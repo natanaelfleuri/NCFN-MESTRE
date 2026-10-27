@@ -116,7 +116,7 @@ Para desinstalar, rode `./uninstall.sh`. Ele não apaga a pasta do projeto.
 
 ## Uso
 
-Clique no ícone **MESTRE**, ou rode `mestre` no terminal. A janela abre em tela cheia e o MESTRE cumprimenta você.
+Clique no ícone **MESTRE**, ou rode `mestre` no terminal. A janela ocupa o monitor inteiro (sem tela cheia, então a barra de tarefas que se oculta sozinha continua aparecendo por cima) e o MESTRE cumprimenta você.
 
 | Ação | Como |
 |---|---|
@@ -261,7 +261,7 @@ Quando o MESTRE abre uma página (`mestre-pc open https://…`), ela abre no seu
 
 - **Primeira página:** janela nova do navegador nos **2/3** do monitor onde o MESTRE está, e o MESTRE em **1/3**, com um layout estreito (símbolo em cima, conversa embaixo).
 - **Páginas seguintes:** abrem como **abas** na mesma janela.
-- **Ao fechar essa janela:** o MESTRE volta sozinho para a tela cheia. Também dá para pedir `mestre-pc unsplit`.
+- **Ao fechar essa janela:** o MESTRE volta sozinho a ocupar o monitor. Também dá para pedir `mestre-pc unsplit`.
 
 Funciona com Brave, Chrome, Chromium, Firefox, Vivaldi e Edge. O navegador automático (Playwright) continua numa janela própria.
 

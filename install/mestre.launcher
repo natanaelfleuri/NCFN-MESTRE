@@ -34,12 +34,12 @@ case "${1:-}" in
   stop) stop_all; notify-send -i "$HOME/.local/share/icons/mestre.svg" "MESTRE" "Desligado."; exit 0 ;;
 esac
 
-# Já aberto (mesmo minimizado): traz a janela de volta, em tela cheia.
+# Já aberto (mesmo minimizado): traz a janela de volta, ocupando o monitor.
 # Para fechar, use o ✕ da janela ou `mestre stop`.
 if running && window_open; then
   "__MESTRE_DIR__/bin/mestre-pc" focus MESTRE >/dev/null 2>&1
   sleep 0.3
-  "__MESTRE_DIR__/bin/mestre-pc" fullscreen MESTRE >/dev/null 2>&1
+  "__MESTRE_DIR__/bin/mestre-pc" fill MESTRE >/dev/null 2>&1
   exit 0
 fi
 
@@ -53,14 +53,26 @@ marcar on
 window_open && exit 0
 mkdir -p "$PROFILE"
 # Perfil próprio: microfone liberado só para 127.0.0.1:7777, áudio sem clique.
-# Quiosque: tela cheia de verdade. Alt+F4 fecha a janela (o servidor segue até
-# o botão ser clicado de novo).
-google-chrome --user-data-dir="$PROFILE" --app="$URL" --kiosk \
+# Barra de título do sistema (não a do Chrome), para o mestre-pc poder tirá-la.
+# Sem tela cheia: a janela ocupa o monitor e a barra de tarefas que se oculta
+# sozinha continua aparecendo por cima. Alt+F4 fecha a janela (o servidor segue
+# até o botão ser clicado de novo).
+python3 - "$PROFILE/Default/Preferences" <<'PY' 2>/dev/null
+import json, os, sys
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    prefs = json.load(open(path))
+except (OSError, ValueError):
+    prefs = {}
+prefs.setdefault('browser', {})['custom_chrome_frame'] = False
+json.dump(prefs, open(path, 'w'))
+PY
+google-chrome --user-data-dir="$PROFILE" --app="$URL" \
   --autoplay-policy=no-user-gesture-required \
   --no-first-run --no-default-browser-check --class=MESTRE >/dev/null 2>&1 &
 disown
-# O gerenciador de janelas ignora o --kiosk: pede a tela cheia direto ao X11.
 for _ in $(seq 1 40); do
-  "__MESTRE_DIR__/bin/mestre-pc" fullscreen MESTRE >/dev/null 2>&1 && break
+  "__MESTRE_DIR__/bin/mestre-pc" fill MESTRE >/dev/null 2>&1 && break
   sleep 0.25
 done

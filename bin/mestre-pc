@@ -12,6 +12,7 @@ if _os.path.exists(_VENV) and _os.path.realpath(_sys.prefix) != _os.path.realpat
   mestre-pc windows                   lista as janelas abertas (id, título)
   mestre-pc focus <trecho do título>  traz a janela para frente
   mestre-pc fullscreen <título> [--off|--toggle]  tela cheia na janela
+  mestre-pc fill <título> [--off|--toggle]  ocupa o monitor sem tela cheia (a barra de tarefas aparece por cima)
   mestre-pc minimize <título>         minimiza a janela
   mestre-pc click X Y [left|right|double]
   mestre-pc move X Y
@@ -20,7 +21,7 @@ if _os.path.exists(_VENV) and _os.path.realpath(_sys.prefix) != _os.path.realpat
   mestre-pc key ctrl+l                atalho de teclado (ctrl, alt, shift, super, enter, tab, esc, f1…)
   mestre-pc open <programa|url|arquivo>   sites abrem dividindo a tela: navegador 2/3, MESTRE 1/3;
                                       os seguintes viram abas na mesma janela
-  mestre-pc unsplit                   desfaz a divisão (MESTRE volta à tela cheia)
+  mestre-pc unsplit                   desfaz a divisão (MESTRE volta a ocupar o monitor)
   mestre-pc camera [arquivo.jpg] [--dispositivo N]   foto da webcam (padrão /tmp/mestre-camera.jpg)
   mestre-pc clipboard                 mostra o texto da área de transferência
   mestre-pc clipboard set "texto"     copia o texto para a área de transferência
@@ -113,6 +114,40 @@ def focus(fragment):
             return
     print(f'nenhuma janela com "{fragment}"')
     sys.exit(1)
+
+
+def _decorations(d, wid, on):
+    """Liga/desliga a barra de título do gerenciador de janelas (_MOTIF_WM_HINTS)."""
+    win = d.create_resource_object('window', wid)
+    atom = d.intern_atom('_MOTIF_WM_HINTS')
+    win.change_property(atom, atom, 32, [2, 0, 1 if on else 0, 0, 0])
+
+
+def fill(fragment, on=1):
+    """Ocupa o monitor inteiro sem ser tela cheia: sem barra de título e 1 px mais
+    baixa que o monitor. Assim a barra de tarefas (que se oculta sozinha) continua
+    aparecendo por cima ao encostar o mouse; em tela cheia o Zorin não a mostra,
+    e trata como tela cheia qualquer janela sem borda do tamanho exato do monitor.
+    on: 1 ocupa, 0 volta a uma janela normal, 2 alterna."""
+    from Xlib import display
+    wid, name = find_window(fragment)
+    if not wid:
+        print(f'nenhuma janela com "{fragment}"')
+        sys.exit(1)
+    d = display.Display()
+    x, y, w, h = _monitor_of(d, wid)
+    win = d.create_resource_object('window', wid)
+    if on == 2:
+        g = win.get_geometry()
+        on = 0 if g.width >= w - 2 and g.height >= h - 3 else 1
+    if on:
+        _decorations(d, wid, False)
+        _move_resize(d, wid, x, y, w, h - 1)
+    else:
+        _decorations(d, wid, True)
+        _move_resize(d, wid, x + w // 8, y + h // 10, w * 3 // 4, h * 4 // 5)
+    d.flush()
+    print(f'{"ocupando o monitor" if on else "janela normal"}: {name}')
 
 
 def fullscreen(fragment, on=True):
@@ -277,13 +312,12 @@ def unsplit():
     d = display.Display()
     mestre, _ = find_window('MESTRE')
     if mestre:
-        _wm_state(d, mestre, 1, '_NET_WM_STATE_FULLSCREEN')
-        d.flush()
+        fill('MESTRE')
     try:
         os.remove(SPLIT_STATE)
     except OSError:
         pass
-    print('MESTRE de volta à tela cheia')
+    print('MESTRE de volta ao monitor inteiro')
 
 
 def restore_window(d, wid):
@@ -442,6 +476,9 @@ def main(argv):
     elif cmd == 'fullscreen':
         on = 2 if '--toggle' in args else 0 if '--off' in args else 1  # _NET_WM_STATE: 0 tira, 1 põe, 2 alterna
         fullscreen(' '.join(a for a in args if not a.startswith('--')), on=on)
+    elif cmd == 'fill':
+        on = 2 if '--toggle' in args else 0 if '--off' in args else 1
+        fill(' '.join(a for a in args if not a.startswith('--')), on=on)
     elif cmd == 'minimize':
         minimize(' '.join(args))
     elif cmd == 'click':

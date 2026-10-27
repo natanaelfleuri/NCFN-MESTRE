@@ -73,6 +73,9 @@ const playQueue = [];
 let playing = null;
 let speechDone = true;
 let quietUntil = 0;
+let playStart = 0;
+let paused = null; // fala pausada por uma possível interrupção: { buf, offset }
+const recentSpoken = []; // últimas frases ditas, para o servidor descartar o eco
 
 async function ensureAudio() {
   if (ctx) return;
@@ -82,15 +85,16 @@ async function ensureAudio() {
   outAnalyser.connect(ctx.destination);
 }
 let relaxTimer = null;
-async function enqueueSpeech(b64, emotion, meta) {
+async function enqueueSpeech(b64, emotion, meta, text) {
   await ensureAudio();
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   const buf = await ctx.decodeAudioData(bytes.buffer);
   buf.emotion = emotion;
   buf.meta = meta;
+  buf.text = meta?.text || text || '';
   if (meta && meta.gen !== reading.gen) return; // trecho de uma leitura já parada
   playQueue.push(buf);
-  if (!playing) playNext();
+  if (!playing && !paused) playNext();
 }
 function playNext() {
   const buf = playQueue.shift();
@@ -107,15 +111,44 @@ function playNext() {
   clearTimeout(relaxTimer);
   if (buf.emotion) face.setExpression(buf.emotion);
   if (buf.meta) onReaderChunk(buf.meta);
+  if (buf.text) {
+    recentSpoken.push(buf.text);
+    if (recentSpoken.length > 4) recentSpoken.shift();
+  }
+  startBuffer(buf, 0);
+}
+function startBuffer(buf, offset) {
   const src = ctx.createBufferSource();
   src.buffer = buf;
   src.connect(outAnalyser);
   src.onended = playNext;
   playing = src;
+  playStart = ctx.currentTime - offset;
   if (uiState !== 'pending') setState('speaking');
-  src.start();
+  src.start(0, offset);
+}
+// Interrupção: pausa já, e só descarta a fala se o servidor confirmar que foi voz.
+function pauseSpeech() {
+  if (!playing) return;
+  const src = playing;
+  src.onended = null;
+  try { src.stop(); } catch {}
+  playing = null;
+  paused = { buf: src.buffer, offset: Math.max(0, ctx.currentTime - playStart - 0.4) };
+}
+function resumeSpeech() {
+  clearTimeout(bargeTimer);
+  barge = null;
+  const p = paused;
+  paused = null;
+  if (playing) return;
+  if (p && p.offset < p.buf.duration - 0.05) startBuffer(p.buf, p.offset);
+  else playNext();
 }
 function stopSpeech() {
+  clearTimeout(bargeTimer);
+  barge = null;
+  paused = null;
   if (reading.active) stopReading(true);
   playQueue.length = 0;
   if (playing) {
@@ -238,6 +271,7 @@ function onMessage(m) {
       setState(m.state);
       break;
     case 'heard':
+      if (barge) resumeSpeech();
       addLog('ignored', `${m.text} (sem “Mestre”)`);
       if (!isSpeaking()) setState('idle');
       break;
@@ -257,7 +291,15 @@ function onMessage(m) {
       face.setExpression(m.name);
       break;
     case 'say':
-      enqueueSpeech(m.audio, m.emotion);
+      enqueueSpeech(m.audio, m.emotion, null, m.text);
+      break;
+    case 'barge_rejected':
+      if (barge) resumeSpeech();
+      break;
+    case 'barge_stop':
+      stopSpeech();
+      addLog('ok', 'Parei de falar.');
+      setState('idle');
       break;
     case 'reader_start':
       Object.assign(reading, { active: true, ended: false, paused: false, gen: (reading.gen || 0) + 0, title: m.title, total: m.total, kind: m.kind, doc: m.doc_id, index: m.index });
@@ -342,6 +384,12 @@ let voiced = 0;
 let silence = 0;
 let noise = 0.008;
 let speech = 0; // blocos de 20 ms com voz dentro da frase atual
+let barge = null; // interrupção em andamento (a fala está pausada)
+let bargeTimer = null;
+let bargeHits = 0;
+let echoRatio = 0.3; // quanto da própria fala volta pelo microfone
+let lastBlock = null;
+const outHist = [];
 
 async function startMic() {
   await ensureAudio();
@@ -384,8 +432,10 @@ function onBlock(block) {
   if (pttHeld) { chunks.push(block); return; }
   if (settings.mode === 'ptt') return;
   const lv = rms(block);
+  const confirmOpen = !$('#confirm').classList.contains('hidden');
+  if (isSpeaking() && !confirmOpen && !recording) return watchBargeIn(block, lv);
   // Mãos livres: não escuta enquanto fala (evita ouvir a própria voz).
-  if (isSpeaking() || performance.now() < quietUntil || !$('#confirm').classList.contains('hidden')) {
+  if (!barge && (isSpeaking() || performance.now() < quietUntil || confirmOpen)) {
     if (recording) endUtterance(false);
     return;
   }
@@ -418,14 +468,81 @@ function endUtterance(sendIt) {
   chunks = [];
   preRoll = [];
   // Mãos livres: menos de ~0,4 s de voz de verdade é ruído (porta, tosse, clique).
-  const tooLittle = !pttHeldLast && speech < 20;
+  // Na interrupção basta ~0,2 s (“para!”), o Whisper confirma depois.
+  const tooLittle = !pttHeldLast && speech < (barge ? 10 : 20);
   speech = 0;
-  if (!sendIt || pcm.length < ctx.sampleRate * 0.4 || tooLittle) {
+  if (!sendIt || pcm.length < ctx.sampleRate * (barge ? 0.25 : 0.4) || tooLittle) {
+    if (barge) return resumeSpeech();
     if (uiState === 'listening') setState('idle');
     return;
   }
   beep(660, 0.06, 0.035);
+  if (barge) {
+    send({ type: 'barge', recent: recentSpoken.slice(-3) });
+    bargeTimer = setTimeout(() => barge && resumeSpeech(), 12000);
+  }
   ws?.send(to16k(pcm));
+}
+
+// ------------------------------------------------------------ interrupção por voz
+// Enquanto fala, só para se ouvir voz humana: alta acima do ruído e do eco da
+// própria fala, com tom de voz (periodicidade de 80–400 Hz), por ~0,2 s seguidos.
+// Barulhos (porta, teclado, ventilador) não têm esse tom; o servidor ainda
+// confirma com o Whisper antes de descartar a resposta.
+function watchBargeIn(block, lv) {
+  preRoll.push(block);
+  if (preRoll.length > 15) preRoll.shift();
+  if (settings.bargeIn === false) return;
+  outHist.push(level(outAnalyser));
+  if (outHist.length > 6) outHist.shift();
+  const out = Math.max(...outHist); // o eco chega com atraso
+  const voice = isVoice(block);
+  const loud = lv > Math.max(0.02, noise * 4, out * echoRatio * 2.5);
+  if (loud && voice) {
+    bargeHits += 1;
+  } else {
+    bargeHits = Math.max(0, bargeHits - 1);
+    if (out > 0.02) echoRatio = Math.min(2, Math.max(0.02, echoRatio * 0.97 + (lv / out) * 0.03));
+  }
+  if (bargeHits >= 8) startBargeIn();
+}
+function startBargeIn() {
+  bargeHits = 0;
+  pauseSpeech();
+  barge = { at: performance.now() };
+  recording = true;
+  chunks = preRoll.slice(-12);
+  preRoll = [];
+  silence = 0;
+  speech = 8;
+  setState('listening');
+}
+function isVoice(block) {
+  const prev = lastBlock;
+  lastBlock = block;
+  if (!prev) return false;
+  const step = Math.max(1, Math.round(ctx.sampleRate / 16000));
+  const n = Math.floor((prev.length + block.length) / step);
+  const x = new Float32Array(n);
+  let mean = 0;
+  for (let i = 0; i < n; i++) {
+    const k = i * step;
+    x[i] = k < prev.length ? prev[k] : block[k - prev.length];
+    mean += x[i];
+  }
+  mean /= n;
+  for (let i = 0; i < n; i++) x[i] -= mean;
+  let best = 0;
+  for (let lag = 40; lag <= 200; lag++) { // 400 Hz a 80 Hz em 16 kHz
+    let xy = 0, xx = 0, yy = 0;
+    for (let i = 0; i + lag < n; i++) {
+      const a = x[i], b = x[i + lag];
+      xy += a * b; xx += a * a; yy += b * b;
+    }
+    const r = xy / Math.sqrt(xx * yy + 1e-12);
+    if (r > best) best = r;
+  }
+  return best > 0.5;
 }
 
 function to16k(f32) {

@@ -140,6 +140,24 @@ def transcribe(pcm16: bytes) -> str:
     return text
 
 
+# Interrupção por voz: a janela pausa a fala ao detectar voz e manda o trecho
+# para cá. Só conta como interrupção se o Whisper ouvir palavras de verdade que
+# não sejam o eco do que o próprio MESTRE estava dizendo.
+STOP_WORDS = re.compile(r'(mestre\W*)?(para|pare|parar|chega|basta|sil[eê]ncio|quieto|espera|espere|stop|'
+                        r'cala a boca|pode parar|para com isso|ok\W*(para|chega))(\W+(a[ií]|um pouco|por favor|agora))?\W*',
+                        re.I)
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r'\w+', text.lower())
+
+
+def is_echo(text: str, recent: list) -> bool:
+    heard = _words(text)
+    said = {w for r in recent for w in _words(str(r))}
+    return bool(heard and said) and sum(w in said for w in heard) / len(heard) >= 0.6
+
+
 # ================================================================ voz
 _kokoro = None
 _piper = None
@@ -1785,7 +1803,7 @@ async def window(action: str):
     if action == 'minimize':
         subprocess.Popen([pc, 'minimize', 'MESTRE'], env=env)
     elif action == 'maximize':
-        subprocess.Popen([pc, 'fullscreen', 'MESTRE', '--toggle'], env=env)
+        subprocess.Popen([pc, 'fill', 'MESTRE', '--toggle'], env=env)
     elif action == 'off':
         subprocess.Popen([str(HOME / '.local' / 'bin' / 'mestre'), 'stop'], start_new_session=True)
     elif action == 'close':
@@ -1803,6 +1821,7 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     clients.add(ws)
     loop = asyncio.get_running_loop()
+    barge = None  # trecho que interrompeu a fala: frases recentes do MESTRE
     await ws.send_json({'type': 'hello', 'settings': public_settings(), 'agenda': load_agenda(),
                         'tasks': list(jobs.values())})
     try:
@@ -1817,6 +1836,19 @@ async def ws_endpoint(ws: WebSocket):
                 except Exception as e:
                     print('[stt]', e, flush=True)
                     text = ''
+                recent, barge = barge, None
+                if recent is not None:
+                    if STOP_WORDS.fullmatch(text.strip()):
+                        print(f'[barge] parar: {text}', flush=True)
+                        mouth.stop()
+                        await brain.interrupt()
+                        await broadcast({'type': 'barge_stop'})
+                        await broadcast({'type': 'status', 'state': 'idle'})
+                        continue
+                    if not text or is_echo(text, recent):
+                        print(f'[barge] ignorado: {text or "(sem fala)"}', flush=True)
+                        await ws.send_json({'type': 'barge_rejected'})
+                        continue
                 if not text:
                     await broadcast({'type': 'status', 'state': 'idle'})
                     continue
@@ -1826,7 +1858,9 @@ async def ws_endpoint(ws: WebSocket):
                 continue
             data = json.loads(msg['text'])
             kind = data.get('type')
-            if kind == 'text':
+            if kind == 'barge':
+                barge = [str(t)[:500] for t in (data.get('recent') or [])[:4]]
+            elif kind == 'text':
                 await handle_utterance(data.get('text', ''), 'typed')
             elif kind and kind.startswith('reader_'):
                 await handle_reader(data)
