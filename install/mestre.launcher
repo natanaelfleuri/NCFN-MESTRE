@@ -6,6 +6,7 @@
 #   mestre status   diz se está ligado
 #   mestre stop     desliga
 #   mestre fechar   fecha só a janela (o servidor segue atendendo o portal)
+#   mestre alternar liga se estiver desligado, desliga se estiver ligado (ícone da área de trabalho)
 URL="http://127.0.0.1:7777/?auto"
 PROFILE="__MESTRE_DIR__/state/chrome"
 DESKTOP_FILE="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")/mestre.desktop"
@@ -29,6 +30,7 @@ stop_all() {
 case "${1:-}" in
   status) if running; then echo "MESTRE ligado"; else echo "MESTRE desligado"; fi; exit 0 ;;
   fechar) pkill -f -- "--user-data-dir=$PROFILE" 2>/dev/null; exit 0 ;;
+  alternar) if running; then stop_all; notify-send -i "$HOME/.local/share/icons/mestre.svg" "MESTRE" "Desligado."; exit 0; fi ;;
   stop) stop_all; notify-send -i "$HOME/.local/share/icons/mestre.svg" "MESTRE" "Desligado."; exit 0 ;;
 esac
 

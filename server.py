@@ -1505,6 +1505,8 @@ async def window(action: str):
         subprocess.Popen([pc, 'minimize', 'MESTRE'], env=env)
     elif action == 'maximize':
         subprocess.Popen([pc, 'fullscreen', 'MESTRE', '--toggle'], env=env)
+    elif action == 'off':
+        subprocess.Popen([str(HOME / '.local' / 'bin' / 'mestre'), 'stop'], start_new_session=True)
     elif action == 'close':
         # Com o portal ligado, o ✕ só fecha a janela: o assistente segue disponível online.
         how = 'fechar' if PORTAL['enabled'] and PORTAL['keep_alive'] else 'stop'

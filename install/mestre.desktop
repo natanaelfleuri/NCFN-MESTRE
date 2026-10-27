@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=MESTRE
-Comment=Assistente de voz MESTRE (abre ou traz a janela; o ✕ da janela fecha)
-Exec=__HOME__/.local/bin/mestre
+Comment=Assistente de voz MESTRE (clique: liga / desliga)
+Exec=__HOME__/.local/bin/mestre alternar
 Icon=__HOME__/.local/share/icons/mestre.svg
 Terminal=false
 Categories=Utility;

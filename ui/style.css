@@ -71,6 +71,8 @@ header::after {
 }
 .winbtns button:hover { background: rgba(0, 229, 255, 0.15); color: #fff; }
 .winbtns .close:hover { background: #e81123; }
+.winbtns .power { color: #ff6b6b; }
+.winbtns .power:hover { background: #b3121f; color: #fff; }
 
 .panel {
   margin: 16px; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); position: relative; z-index: 4;

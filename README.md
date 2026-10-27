@@ -127,7 +127,8 @@ Clique no ícone **MESTRE**, ou rode `mestre` no terminal. A janela abre em tela
 | Interromper a fala | **Esc** ou ■ |
 | Nova conversa | ⟲ |
 | Configurações | Botão **⚙ Configurações** ou ⚙ no canto superior |
-| Minimizar, maximizar ou fechar | Botões – ▢ ✕ no canto superior direito. O ✕ fecha e desliga o servidor. |
+| Minimizar, maximizar, fechar ou desligar | Botões – ▢ ⏻ ✕ no canto superior direito. O ⏻ desliga tudo (janela e servidor); o ✕ fecha a janela (com o portal ligado, o servidor segue atendendo). |
+| Ligar / desligar pela área de trabalho | Clique no ícone MESTRE: liga se estiver desligado, desliga se estiver ligado (`mestre alternar`). O nome do ícone mostra 🟢 quando está ligado. |
 | Reabrir a janela minimizada | Clique no ícone MESTRE de novo |
 
 ### Modos de escuta

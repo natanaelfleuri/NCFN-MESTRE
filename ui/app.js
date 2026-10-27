@@ -666,6 +666,7 @@ const win = (a) => fetch(`/api/window/${a}`, { method: 'POST' });
 $('#w-min').onclick = () => win('minimize');
 $('#w-max').onclick = () => win('maximize');
 $('#w-close').onclick = () => { stopSpeech(); win('close'); };
+$('#w-off').onclick = () => { stopSpeech(); win('off'); };
 const openSettings = () => {
   $('#settings').classList.toggle('hidden');
   if (!$('#settings').classList.contains('hidden')) loadConnections();
