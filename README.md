@@ -120,6 +120,9 @@ Clique no ícone **MESTRE**, ou rode `mestre` no terminal. A janela abre em tela
 |---|---|
 | Falar | No modo **Conversa livre**, basta falar. Também dá para segurar a **barra de espaço** (sem limite de tempo) ou o botão do microfone. |
 | Digitar | Caixa "…ou digite um comando" |
+| Falar pelo símbolo | **Segure o botão esquerdo** sobre o símbolo NCFN (solte para enviar) |
+| Configurações pelo símbolo | **Botão direito** sobre o símbolo |
+| Ligar e desligar a animação | **Rodinha do mouse** sobre o símbolo. Desligada, o símbolo fica parado e esmaecido e poupa a GPU; a escolha fica salva. |
 | Interromper a fala | **Esc** ou ■ |
 | Nova conversa | ⟲ |
 | Configurações | Botão **⚙ Configurações** ou ⚙ no canto superior |

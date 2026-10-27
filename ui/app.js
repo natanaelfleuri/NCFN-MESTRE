@@ -459,6 +459,30 @@ function pttUp() {
   endUtterance(true);
 }
 $('#mic').addEventListener('pointerdown', pttDown);
+
+// Símbolo central: esquerdo segura para falar, direito abre as configurações,
+// rodinha liga/desliga a animação.
+let animOff = false;
+function setAnimation(off) {
+  animOff = off;
+  face.setPaused(off);
+  document.body.classList.toggle('anim-off', off);
+  try { localStorage.setItem('mestre-anim-off', off ? '1' : '0'); } catch {}
+}
+try { if (localStorage.getItem('mestre-anim-off') === '1') setAnimation(true); } catch {}
+const faceEl = $('#face');
+faceEl.addEventListener('pointerdown', (e) => {
+  if (e.button === 0) { e.preventDefault(); pttDown(); }
+  else if (e.button === 1) { e.preventDefault(); setAnimation(!animOff); }
+});
+faceEl.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); }); // sem auto-rolagem do Chrome
+faceEl.addEventListener('auxclick', (e) => e.preventDefault());
+faceEl.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  pttUp();
+  $('#settings').classList.remove('hidden');
+  loadConnections();
+});
 window.addEventListener('pointerup', pttUp);
 const typing = () => document.activeElement?.tagName === 'INPUT';
 window.addEventListener('keydown', (e) => {

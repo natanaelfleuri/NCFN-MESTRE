@@ -93,7 +93,13 @@ export function createFace(canvas) {
     return `rgba(${Math.min(255, r + boost) | 0},${Math.min(255, g + boost) | 0},${Math.min(255, b + boost) | 0},${Math.max(0, Math.min(1, a))})`;
   };
 
+  let paused = false;
   function frame(now) {
+    if (paused) {
+      // animação desligada: o último quadro fica parado, sem gastar GPU
+      requestAnimationFrame(frame);
+      return;
+    }
     try {
       draw(now);
     } catch (e) {
@@ -382,6 +388,7 @@ export function createFace(canvas) {
     setColor(rgb) { st.targetColor = rgb; },
     setEnergy(v) { st.energy = v; },
     setGender(g) { st.variant = g === 'feminino' ? 'fluida' : 'angular'; },
+    setPaused(v) { paused = Boolean(v); },
     setExpression(name) { target = { ...BASE, ...(MOODS[name] || {}) }; },
     expressions: Object.keys(MOODS),
   };

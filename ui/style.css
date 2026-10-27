@@ -324,3 +324,11 @@ body.norain #rain { display: none; }
 .modal-player span { flex: 1; color: var(--dim); font-size: 12px; letter-spacing: 1px; }
 .modal-player button { background: rgba(0, 229, 255, 0.08); color: var(--text); border: 1px solid var(--line); padding: 7px 12px; font: inherit; font-size: 12.5px; cursor: pointer; letter-spacing: 1px; }
 .modal-player button:hover { border-color: var(--c); color: #fff; }
+
+#face { cursor: pointer; }
+body.anim-off .r { animation-play-state: paused; }
+body.anim-off #face { opacity: 0.35; filter: grayscale(0.4); transition: opacity 0.4s; }
+body.anim-off #wave { visibility: hidden; }
+body.anim-off #status-dot { animation: none; }
+.reactor .hint-click { position: absolute; top: 4%; font-size: 11px; letter-spacing: 2px; color: var(--dim); opacity: 0; transition: opacity 0.4s; pointer-events: none; text-transform: uppercase; }
+.reactor:hover .hint-click { opacity: 0.8; }
