@@ -273,6 +273,13 @@
             <label>Tom <input id="pitch" type="range" min="0.75" max="1.15" step="0.01"><b id="pitch-v"></b></label>
             <button id="test-voice">Testar voz</button>
           </div>
+          <h3>Como chamar você</h3>
+          <div class="keyrow">
+            <label class="addr">Voz masculina <input id="addr-m" type="text" maxlength="30" autocomplete="off" placeholder="MESTRE"></label>
+            <label class="addr">Voz feminina <input id="addr-f" type="text" maxlength="30" autocomplete="off" placeholder="DÍVA"></label>
+            <button id="addr-save">Salvar</button>
+          </div>
+          <div class="note" id="addr-state"></div>
           <h3>Imagem</h3>
           <div class="swatches" id="theme">
             <button data-v="auto" title="Automática (ciano masculino, rosa feminino)">Auto</button>

@@ -3,7 +3,7 @@
   "model": "sonnet",
   "whisper_model": "large-v3-turbo",
   "follow_up_seconds": 12,
-  "greeting": "Sistemas on-line. Bem-vindo de volta, senhor. Em que posso ajudar?",
+  "greeting": "Sistemas on-line. Bem-vindo de volta, {tratamento}. Em que posso ajudar?",
   "mode": "free",
   "stt": "local",
   "openai_stt_model": "gpt-4o-transcribe",
@@ -27,7 +27,7 @@
     "meu site local": "http://127.0.0.1:8080/"
   },
   "task_timeout": 1800,
-  "greeting_f": "Sistemas on-line. Bem-vindo de volta, senhor. Em que posso ajudar?",
+  "greeting_f": "Sistemas on-line. Bem-vindo de volta, {tratamento}. Em que posso ajudar?",
   "theme": "auto",
   "rain": true,
   "permissions": {},

@@ -652,6 +652,11 @@ function applySettings(s) {
   $('#pitch-v').textContent = Number(settings.pitch ?? 1).toFixed(2);
   renderPerms();
   if (document.activeElement !== $('#mem-dir')) $('#mem-dir').value = settings.memory_dir || '';
+  if (![$('#addr-m'), $('#addr-f')].includes(document.activeElement)) {
+    $('#addr-m').value = settings.address_m || '';
+    $('#addr-f').value = settings.address_f || '';
+  }
+  $('#addr-state').textContent = `Escolhido pelo tom da sua voz. Agora: ${settings.address_now === 'f' ? settings.address_f : settings.address_m}${settings.address_pitch ? ` (último tom: ${settings.address_pitch} Hz; abaixo de 155 é masculina, acima de 175 feminina)` : ''}. Campo vazio volta ao padrão.`;
   const vaultOn = (settings.permissions || []).find((p) => p.key === 'vault')?.on !== false;
   $('#mem-state').textContent = !settings.memory_dir
     ? 'Nenhuma pasta escolhida: o MESTRE não guarda memória em arquivos.'
@@ -759,6 +764,9 @@ async function saveMemoryDir() {
 $('#mem-save').onclick = saveMemoryDir;
 $('#mem-dir').onkeydown = (e) => { if (e.key === 'Enter') saveMemoryDir(); };
 $('#mem-open').onclick = () => fetch('/api/memory/open', { method: 'POST' });
+const saveAddress = () => postSettings({ address_m: $('#addr-m').value, address_f: $('#addr-f').value });
+$('#addr-save').onclick = saveAddress;
+$$('#addr-m, #addr-f').forEach((i) => (i.onkeydown = (e) => { if (e.key === 'Enter') saveAddress(); }));
 $('#save-key').onclick = () => { postSettings({ openai_api_key: $('#openai-key').value }); $('#openai-key').value = ''; };
 
 function renderAgenda(items) {

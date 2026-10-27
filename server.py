@@ -140,6 +140,74 @@ def transcribe(pcm16: bytes) -> str:
     return text
 
 
+# Tratamento pela voz: tom médio grave (< 155 Hz) é voz masculina e o MESTRE
+# chama o usuário de "MESTRE"; agudo (> 175 Hz), feminina, e chama de "DÍVA"
+# (as palavras mudam nas configurações). Na faixa do meio (ou com pouca voz)
+# mantém o último tratamento.
+ADDRESS_DEFAULT = {'m': 'MESTRE', 'f': 'DÍVA'}
+ADDRESS_FILE = STATE / 'tratamento.json'
+
+
+def address_word(voice: str | None = None) -> str:
+    voice = voice or address
+    return (CONFIG.get(f'address_{voice}') or '').strip() or ADDRESS_DEFAULT[voice]
+
+
+def voice_pitch(pcm16: bytes) -> float | None:
+    """Frequência fundamental mediana (Hz) dos trechos com voz, por autocorrelação."""
+    x = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32) / 32768.0
+    size, hop, lo, hi = 640, 160, 16000 // 400, 16000 // 60  # janelas de 40 ms; 60 a 400 Hz
+    if len(x) < size * 4:
+        return None
+    frames = np.lib.stride_tricks.sliding_window_view(x, size)[::hop]
+    energy = np.sqrt((frames ** 2).mean(axis=1))
+    f0 = []
+    for frame in frames[energy > max(0.01, np.percentile(energy, 60) * 0.5)]:
+        frame = (frame - frame.mean()) * np.hanning(size)
+        spec = np.fft.rfft(frame, 2 * size)
+        ac = np.fft.irfft(spec * np.conj(spec))[:hi + 1]
+        if ac[0] <= 0:
+            continue
+        ac = ac / ac[0]
+        seg = ac[lo:hi + 1]
+        peak = seg.max()
+        if peak < 0.45:
+            continue
+        # o menor atraso perto do máximo evita pegar a oitava de baixo; depois
+        # sobe até o topo desse pico e refina entre as amostras (parábola)
+        i = int(np.argmax(seg >= peak * 0.85))
+        while i + 1 < len(seg) and seg[i + 1] > seg[i]:
+            i += 1
+        a, b, c = seg[max(i - 1, 0)], seg[i], seg[min(i + 1, len(seg) - 1)]
+        shift = 0.5 * (a - c) / (a - 2 * b + c) if a - 2 * b + c < 0 else 0.0
+        f0.append(16000 / (lo + i + shift))
+    return float(np.median(f0)) if len(f0) >= 15 else None
+
+
+def load_address() -> str:
+    try:
+        voice = json.loads(ADDRESS_FILE.read_text())['voz']
+    except (OSError, ValueError, KeyError):
+        voice = 'm'
+    return voice if voice in ADDRESS_DEFAULT else 'm'
+
+
+def update_address(pcm16: bytes):
+    global address, last_pitch
+    f0 = voice_pitch(pcm16)
+    last_pitch = f0 or last_pitch
+    if f0 is not None and (f0 < 155 or f0 > 175):
+        new = 'm' if f0 < 155 else 'f'
+        if new != address:
+            address = new
+            ADDRESS_FILE.write_text(json.dumps({'voz': address}))
+        print(f'[voz] {f0:.0f} Hz → {address_word()}', flush=True)
+
+
+address = load_address()
+last_pitch = None
+
+
 # Interrupção por voz: a janela pausa a fala ao detectar voz e manda o trecho
 # para cá. Só conta como interrupção se o Whisper ouvir palavras de verdade que
 # não sejam o eco do que o próprio MESTRE estava dizendo.
@@ -230,6 +298,9 @@ def speakable(text: str) -> str:
     t = re.sub(r'[*_#>|~]+', ' ', t)
     t = re.sub(r'^\s*[-•]\s+', '', t, flags=re.M)
     t = t.replace('%', ' por cento').replace('&', ' e ').replace('/', ' barra ')
+    for voice in ADDRESS_DEFAULT:  # em maiúsculas a voz soletraria a palavra
+        word = address_word(voice)
+        t = re.sub(rf'\b{re.escape(word)}\b', word.capitalize(), t)
     return re.sub(r'\s+', ' ', t).strip()
 
 
@@ -672,7 +743,7 @@ async def send_to_brain(text: str, echo=True):
     if brain.busy:
         await brain.interrupt()
         await asyncio.sleep(0.3)
-    await brain.ask(text)
+    await brain.ask(f'[tratamento: {address_word()}] {text}')
 
 
 async def handle_utterance(text: str, source: str):
@@ -1530,6 +1601,8 @@ def public_settings():
             'model': CONFIG['model'], 'watch': CONFIG.get('watch', True),
             'openai_key_set': bool(secrets().get('openai_api_key')), 'always': always_rules(),
             'theme': CONFIG.get('theme', 'auto'), 'rain': CONFIG.get('rain', True),
+            'address_m': address_word('m'), 'address_f': address_word('f'), 'address_now': address,
+            'address_pitch': round(last_pitch) if last_pitch else None,
             'ticker': CONFIG.get('ticker', True) and permissions.current().get('news', True),
             **memory_info(),
             'newsflash': news.db_path() is not None,
@@ -1566,6 +1639,10 @@ async def set_settings(req: Request):
         CONFIG['rain'] = data['rain']
     if isinstance(data.get('ticker'), bool):
         CONFIG['ticker'] = data['ticker']
+    for voice in ADDRESS_DEFAULT:  # vazio volta ao padrão (MESTRE / DÍVA)
+        word = data.get(f'address_{voice}')
+        if isinstance(word, str):
+            CONFIG[f'address_{voice}'] = re.sub(r'[\[\]\n\r\t]', ' ', word).strip()[:30]
     g = CONFIG.get('gender', 'masculino')
     if data.get('voice') in VOICE_CHOICES[g]:
         CONFIG['voices'][g]['voice'] = data['voice']
@@ -1837,6 +1914,8 @@ async def ws_endpoint(ws: WebSocket):
                     print('[stt]', e, flush=True)
                     text = ''
                 recent, barge = barge, None
+                if text and recent is None:  # no trecho da interrupção pode vir o eco da voz do MESTRE
+                    await loop.run_in_executor(STT_POOL, update_address, msg['bytes'])
                 if recent is not None:
                     if STOP_WORDS.fullmatch(text.strip()):
                         print(f'[barge] parar: {text}', flush=True)
@@ -1875,11 +1954,13 @@ async def ws_endpoint(ws: WebSocket):
                 await broadcast({'type': 'reset'})
             elif kind == 'test_voice':
                 mouth.stop()
-                mouth.say('Teste de voz. É assim que eu soo agora, senhor.' if CONFIG.get('gender') != 'feminino'
-                          else 'Teste de voz. É assim que eu soo agora.')
+                mouth.say(f'Teste de voz. É assim que eu soo agora, {address_word()}.')
             elif kind == 'greet':
                 await broadcast({'type': 'emotion', 'name': 'sorriso'})
-                mouth.say(CONFIG['greeting_f' if CONFIG.get('gender') == 'feminino' else 'greeting'])
+                greeting = CONFIG['greeting_f' if CONFIG.get('gender') == 'feminino' else 'greeting']
+                if address == 'f':
+                    greeting = greeting.replace('Bem-vindo', 'Bem-vinda')
+                mouth.say(greeting.replace('{tratamento}', address_word()))
     except WebSocketDisconnect:
         pass
     finally:
