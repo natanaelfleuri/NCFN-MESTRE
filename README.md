@@ -43,6 +43,8 @@ Um **guardião** fica entre o cérebro e o computador e pede confirmação antes
 | Agenda | "Me lembre às 15h de ligar para o cliente", "Todo dia útil às 8h, me dê um resumo do dia." |
 | Segundo plano | "Pesquise a fundo X e me avise quando terminar"; a conversa continua livre enquanto isso. |
 | Câmera (opcional) | "Olhe pela câmera e me diga o que vê." |
+| Livros e documentos | Envie um PDF ou EPUB no **Leitor** e peça "leia para mim" ou "o que diz o capítulo 3?" |
+| Memória | "Anote que prefiro respostas curtas de manhã"; ele guarda no seu Obsidian e lembra depois. |
 
 ---
 
@@ -229,6 +231,51 @@ Na conversa, basta pedir: "me lembre…", "todo dia às…", "faça isso em segu
 
 ---
 
+## Leitor: notícias e biblioteca
+
+O botão **📖 Leitor** abre um painel com três abas:
+
+- **Notícias:** as manchetes do NewsFlash separadas por **categoria** (Todas, Tecnologia, Esportes…).
+  - Cada manchete tem **▶ Ler resumo**, **▶ Matéria completa** (o MESTRE baixa o texto do site) e **↗ Abrir**.
+  - **Ler resumos desta categoria** lê a categoria em sequência.
+  - **Resumo pelo MESTRE** pede à IA as cinco mais importantes.
+- **Biblioteca:** envie **PDF, EPUB, DOCX, TXT, MD ou HTML**, até 200 MB, clicando ou arrastando o arquivo.
+  - O texto é extraído e guardado em `~/Documentos/MESTRE/biblioteca/`.
+  - Cada documento tem **▶ Ler / Continuar** (a posição fica salva), **⏮ Do início**, **↷ Ir para página**, **✦ Perguntar à IA** (resumo ou perguntas sobre o conteúdo) e **✕ Remover**.
+- **Ajustes da leitura:** velocidade (0,6× a 1,6×), voz (pode ser outra, diferente da do MESTRE), tom, pausa entre parágrafos e mostrar ou não o trecho que está sendo lido.
+
+**Controles durante a leitura:** ⏮ ⏸/▶ ⏹ ⏭, na barra embaixo do símbolo e dentro do painel. Segurar o espaço para falar com o MESTRE para a leitura, e o ▶ retoma de onde parou. PDFs escaneados como imagem não têm texto para extrair.
+
+---
+
+## Tela dividida
+
+Quando o MESTRE abre uma página (`mestre-pc open https://…`), ela abre no seu navegador padrão **dividindo a tela**:
+
+- **Primeira página:** janela nova do navegador nos **2/3** do monitor onde o MESTRE está, e o MESTRE em **1/3**, com um layout estreito (símbolo em cima, conversa embaixo).
+- **Páginas seguintes:** abrem como **abas** na mesma janela.
+- **Ao fechar essa janela:** o MESTRE volta sozinho para a tela cheia. Também dá para pedir `mestre-pc unsplit`.
+
+Funciona com Brave, Chrome, Chromium, Firefox, Vivaldi e Edge. O navegador automático (Playwright) continua numa janela própria.
+
+---
+
+## Memória no Obsidian
+
+Com `"memory_dir"` no `config.json` apontando para uma pasta do seu cofre do Obsidian, essa pasta vira a **memória de longo prazo** do MESTRE:
+
+- **O que ele guarda sozinho, sem pedir licença:** preferências, fatos sobre você e seus projetos, decisões, pendências e resultados de pesquisas.
+  - Cada assunto vira uma nota Markdown com frontmatter (`tags`, `criado`, `atualizado`) e links `[[…]]`.
+  - O índice fica em `00 - ÍNDICE.md`, os fatos sobre você em `SOBRE O USUÁRIO.md` e o diário das conversas relevantes em `CONVERSAS.md`.
+- **Ao iniciar:** ele lê o índice, a nota sobre você e o fim do diário.
+- **Guardião:** só essa pasta fica liberada para escrita. O resto do cofre continua protegido, e apagar continua pedindo confirmação.
+- **Nunca guarda** senhas, tokens ou chaves.
+- **Desligar:** a permissão **Memória no Obsidian**.
+
+Você pode ler, corrigir ou apagar as notas quando quiser; ele segue a versão corrigida.
+
+---
+
 ## Notícias (NewsFlash)
 
 Se o leitor de RSS [NewsFlash](https://flathub.org/apps/io.gitlab.news_flash.NewsFlash) estiver instalado (Flatpak ou nativo), o MESTRE usa **as suas assinaturas e categorias** dele:
@@ -262,6 +309,7 @@ bin/mestre-agenda    lembretes e tarefas agendadas
 bin/mestre-tarefa    tarefas em segundo plano
 bin/mestre-noticias  notícias dos feeds do NewsFlash
 news.py              leitura do NewsFlash e dos feeds RSS/Atom
+reader.py            biblioteca: extração de PDF/EPUB/DOCX/TXT e trechos para leitura
 ui/                  interface: index.html, style.css, app.js, symbol.js (símbolo NCFN)
 install/             modelos do serviço systemd, do lançador e do atalho
 config.example.json  configuração inicial (vira config.json)
@@ -274,13 +322,16 @@ models/              modelos de voz baixados (ignorado pelo git)
 | Direção | Mensagem |
 |---|---|
 | interface → servidor | áudio PCM int16 16 kHz (binário); `{type:'text'}`, `decision`, `stop`, `reset`, `greet`, `test_voice` |
-| servidor → interface | `status`, `user`, `delta` (texto da resposta), `say` (áudio WAV + emoção), `emotion`, `tool`, `pending`, `approved`, `denied`, `task`, `reminder`, `alert`, `agenda`, `settings` |
+| leitor (interface → servidor) | `reader_play`, `reader_need`, `reader_pos`, `reader_seek`, `reader_stop` |
+| servidor → interface | `reader_start`, `reader_say` (trecho em áudio + texto + página), `reader_end_queued`, `library`, `status`, `user`, `delta` (texto da resposta), `say` (áudio WAV + emoção), `emotion`, `tool`, `pending`, `approved`, `denied`, `task`, `reminder`, `alert`, `agenda`, `settings` |
 
 APIs HTTP:
 - `GET /api/stats` e `GET/POST /api/settings`;
 - `GET /api/connections` e `POST /api/connect/{id}`;
 - `GET/POST/DELETE /api/agenda` e `POST /api/task`;
 - `GET /api/news` (manchetes do NewsFlash);
+- `GET /api/library`, `POST /api/library/upload` (corpo = arquivo, cabeçalho `X-Filename`), `DELETE /api/library/{id}`, `POST /api/library/{id}/ask`;
+- `GET/POST /api/reader/settings`;
 - `POST /api/window/{minimize|maximize|close}`.
 
 ---
@@ -288,6 +339,7 @@ APIs HTTP:
 ## Personalização
 
 - **Personalidade:** edite `persona.md`. Para dar ao MESTRE contexto sobre você (profissão, projetos, máquinas) sem publicar nada, crie `persona.local.md`.
+- **Memória:** em `config.json`, `"memory_dir": "~/Documentos/Obsidian/MEMÓRIA DO ASSISTENTE"`.
 - **Áreas protegidas:** em `config.json`, `"protected_paths": ["~/projetos/importante", "COFRE"]`.
 - **Endereços vigiados:** em `config.json`, `"watch_urls": {"meu site": "http://127.0.0.1:8080/"}`.
 - **Vozes:** em `config.json`, na chave `voices`.

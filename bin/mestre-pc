@@ -18,7 +18,9 @@ if _os.path.exists(_VENV) and _os.path.realpath(_sys.prefix) != _os.path.realpat
   mestre-pc scroll N                  N>0 desce, N<0 sobe
   mestre-pc type "texto"              digita o texto
   mestre-pc key ctrl+l                atalho de teclado (ctrl, alt, shift, super, enter, tab, esc, f1…)
-  mestre-pc open <programa|url|arquivo>
+  mestre-pc open <programa|url|arquivo>   sites abrem dividindo a tela: navegador 2/3, MESTRE 1/3;
+                                      os seguintes viram abas na mesma janela
+  mestre-pc unsplit                   desfaz a divisão (MESTRE volta à tela cheia)
   mestre-pc camera [arquivo.jpg] [--dispositivo N]   foto da webcam (padrão /tmp/mestre-camera.jpg)
   mestre-pc clipboard                 mostra o texto da área de transferência
   mestre-pc clipboard set "texto"     copia o texto para a área de transferência
@@ -26,6 +28,8 @@ if _os.path.exists(_VENV) and _os.path.realpath(_sys.prefix) != _os.path.realpat
   mestre-pc media play|pause|proxima|anterior
 """
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -80,11 +84,24 @@ def windows():
     return out
 
 
+def find_window(fragment):
+    """(id, título): título exatamente igual primeiro; senão, que contenha o trecho."""
+    frag = fragment.lower()
+    wins = windows()
+    for wid, name in wins:
+        if name.lower() == frag:
+            return wid, name
+    for wid, name in wins:
+        if frag in name.lower():
+            return wid, name
+    return None, None
+
+
 def focus(fragment):
     from Xlib import X, display, protocol
-    frag = fragment.lower()
-    for wid, name in windows():
-        if frag in name.lower():
+    wid, name = find_window(fragment)
+    for wid, name in ([(wid, name)] if wid else []):
+        if True:
             d = display.Display()
             root = d.screen().root
             w = d.create_resource_object('window', wid)
@@ -101,9 +118,9 @@ def focus(fragment):
 def fullscreen(fragment, on=True):
     """Pede ao gerenciador de janelas a tela cheia (_NET_WM_STATE_FULLSCREEN)."""
     from Xlib import X, display, protocol
-    frag = fragment.lower()
-    for wid, name in windows():
-        if frag in name.lower():
+    wid, name = find_window(fragment)
+    for wid, name in ([(wid, name)] if wid else []):
+        if True:
             d = display.Display()
             root = d.screen().root
             w = d.create_resource_object('window', wid)
@@ -120,9 +137,9 @@ def fullscreen(fragment, on=True):
 
 def minimize(fragment):
     from Xlib import X, display, protocol
-    frag = fragment.lower()
-    for wid, name in windows():
-        if frag in name.lower():
+    wid, name = find_window(fragment)
+    for wid, name in ([(wid, name)] if wid else []):
+        if True:
             d = display.Display()
             root = d.screen().root
             w = d.create_resource_object('window', wid)
@@ -133,6 +150,160 @@ def minimize(fragment):
             print(f'minimizada: {name}')
             return
     sys.exit(1)
+
+
+SPLIT_STATE = f'/tmp/mestre-split-{os.getuid()}.json'
+
+
+def _wm_state(d, wid, action, *atoms):
+    """_NET_WM_STATE: action 0 tira, 1 põe."""
+    from Xlib import X, protocol
+    root = d.screen().root
+    w = d.create_resource_object('window', wid)
+    names = [d.intern_atom(a) for a in atoms] + [0]
+    ev = protocol.event.ClientMessage(window=w, client_type=d.intern_atom('_NET_WM_STATE'),
+                                      data=(32, [action, names[0], names[1], 1, 0]))
+    root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+
+
+def _move_resize(d, wid, x, y, w, h):
+    from Xlib import X, protocol
+    root = d.screen().root
+    win = d.create_resource_object('window', wid)
+    for pair in (('_NET_WM_STATE_FULLSCREEN', ''), ('_NET_WM_STATE_MAXIMIZED_VERT', '_NET_WM_STATE_MAXIMIZED_HORZ')):
+        _wm_state(d, wid, 0, *[a for a in pair if a])
+    d.flush()
+    time.sleep(0.25)
+    flags = 1 | (0xF << 8)  # gravidade noroeste + x, y, largura e altura
+    ev = protocol.event.ClientMessage(window=win, client_type=d.intern_atom('_NET_MOVERESIZE_WINDOW'),
+                                      data=(32, [flags, int(x), int(y), int(w), int(h)]))
+    root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+    d.flush()
+
+
+def _monitor_of(d, wid):
+    """Retângulo (x, y, w, h) do monitor onde está a janela, descontando o painel."""
+    from Xlib import X
+    root = d.screen().root
+    win = d.create_resource_object('window', wid)
+    g = win.get_geometry()
+    pos = win.translate_coords(root, 0, 0)
+    cx, cy = -pos.x + g.width // 2, -pos.y + g.height // 2
+    mons = root.xrandr_get_monitors().monitors
+    m = next((m for m in mons if m.x <= cx < m.x + m.width_in_pixels and m.y <= cy < m.y + m.height_in_pixels),
+             next((m for m in mons if m.primary), mons[0]))
+    x, y, w, h = m.x, m.y, m.width_in_pixels, m.height_in_pixels
+    try:  # área útil: tira barras/painéis que encostam neste monitor
+        wa = root.get_full_property(d.intern_atom('_NET_WORKAREA'), X.AnyPropertyType).value[:4]
+        bottom = min(y + h, wa[1] + wa[3])
+        top = max(y, wa[1])
+        if bottom - top > h * 0.6:
+            y, h = top, bottom - top
+    except Exception:
+        pass
+    return x, y, w, h
+
+
+def _browser():
+    try:
+        desk = subprocess.run(['xdg-settings', 'get', 'default-web-browser'], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        desk = ''
+    for name, cmd in (('brave', 'brave-browser'), ('chrome', 'google-chrome'), ('chromium', 'chromium'),
+                      ('firefox', 'firefox'), ('vivaldi', 'vivaldi'), ('edge', 'microsoft-edge')):
+        if name in desk and shutil.which(cmd):
+            return cmd
+    return next((c for c in ('brave-browser', 'google-chrome', 'firefox', 'chromium') if shutil.which(c)), None)
+
+
+def open_split(url):
+    """Primeira página: janela nova do navegador em 2/3 e o MESTRE em 1/3 do mesmo
+    monitor. As seguintes: abas na mesma janela."""
+    import json as _json
+    from Xlib import display
+    browser = _browser()
+    if not browser:
+        subprocess.Popen(['xdg-open', url], start_new_session=True)
+        return print(f'abrindo {url}')
+    d = display.Display()
+    try:
+        state = _json.load(open(SPLIT_STATE))
+    except (OSError, ValueError):
+        state = {}
+    alive = {wid for wid, _ in windows()}
+    if state.get('wid') in alive:
+        focus_id(state['wid'])
+        time.sleep(0.3)
+        subprocess.Popen([browser, url], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return print(f'aberto em nova aba: {url}')
+    before = alive
+    subprocess.Popen([browser, '--new-window', url], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    new = None
+    for _ in range(40):
+        time.sleep(0.25)
+        fresh = [(wid, name) for wid, name in windows() if wid not in before]
+        if fresh:
+            new = fresh[-1][0]
+            break
+    mestre, _ = find_window('MESTRE')
+    if not new or not mestre:
+        return print(f'abrindo {url} (sem dividir a tela: {"janela do navegador não encontrada" if not new else "MESTRE fechado"})')
+    restore_window(d, mestre)  # tira o MESTRE do minimizado, se estiver
+    time.sleep(0.4)
+    x, y, w, h = _monitor_of(d, mestre)
+    big = round(w * 2 / 3)
+    _move_resize(d, new, x, y, big, h)
+    _move_resize(d, mestre, x + big, y, w - big, h)
+    time.sleep(0.3)
+    focus_id(new)
+    _json.dump({'wid': new, 'monitor': [x, y, w, h]}, open(SPLIT_STATE, 'w'))
+    print(f'aberto dividindo a tela (navegador 2/3, MESTRE 1/3): {url}')
+
+
+def split_check():
+    """Se a janela da divisão foi fechada, devolve o MESTRE à tela cheia."""
+    import json as _json
+    try:
+        state = _json.load(open(SPLIT_STATE))
+    except (OSError, ValueError):
+        return
+    if state.get('wid') not in {wid for wid, _ in windows()}:
+        unsplit()
+
+
+def unsplit():
+    from Xlib import display
+    d = display.Display()
+    mestre, _ = find_window('MESTRE')
+    if mestre:
+        _wm_state(d, mestre, 1, '_NET_WM_STATE_FULLSCREEN')
+        d.flush()
+    try:
+        os.remove(SPLIT_STATE)
+    except OSError:
+        pass
+    print('MESTRE de volta à tela cheia')
+
+
+def restore_window(d, wid):
+    """Desminimiza e traz para frente (o pedido de ativação sozinho pode ser ignorado)."""
+    # O Mutter ignora "ativar" vindo de outro programa, mas desminimiza a janela
+    # que recebe tela cheia: liga a tela cheia; o redimensionamento a tira depois.
+    _wm_state(d, wid, 1, '_NET_WM_STATE_FULLSCREEN')
+    d.flush()
+    focus_id(wid)
+
+
+def focus_id(wid):
+    from Xlib import X, display, protocol
+    d = display.Display()
+    root = d.screen().root
+    w = d.create_resource_object('window', wid)
+    ev = protocol.event.ClientMessage(window=w, client_type=d.intern_atom('_NET_ACTIVE_WINDOW'),
+                                      data=(32, [2, X.CurrentTime, 0, 0, 0]))
+    root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+    d.flush()
 
 
 def mouse():
@@ -298,15 +469,22 @@ def main(argv):
         volume(args[0] if args else None)
     elif cmd == 'media':
         media(args[0] if args else '')
+    elif cmd == 'unsplit':
+        unsplit()
     elif cmd == 'open':
         target = ' '.join(args)
-        if '://' in target or os.path.exists(os.path.expanduser(target)):
+        if re.match(r'https?://', target) or target.lower().endswith(('.html', '.htm')):
+            open_split(target if '://' in target else 'file://' + os.path.abspath(os.path.expanduser(target)))
+        elif '://' in target or os.path.exists(os.path.expanduser(target)):
             subprocess.Popen(['xdg-open', os.path.expanduser(target)], start_new_session=True,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f'abrindo {target}')
         else:
             subprocess.Popen(['gtk-launch', target], start_new_session=True,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f'abrindo {target}')
+            print(f'abrindo {target}')
+    elif cmd == 'split-check':
+        split_check()
     else:
         print(__doc__)
         sys.exit(1)

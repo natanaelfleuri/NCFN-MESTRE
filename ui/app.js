@@ -81,11 +81,13 @@ async function ensureAudio() {
   outAnalyser.connect(ctx.destination);
 }
 let relaxTimer = null;
-async function enqueueSpeech(b64, emotion) {
+async function enqueueSpeech(b64, emotion, meta) {
   await ensureAudio();
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   const buf = await ctx.decodeAudioData(bytes.buffer);
   buf.emotion = emotion;
+  buf.meta = meta;
+  if (meta && meta.gen !== reading.gen) return; // trecho de uma leitura já parada
   playQueue.push(buf);
   if (!playing) playNext();
 }
@@ -93,6 +95,7 @@ function playNext() {
   const buf = playQueue.shift();
   if (!buf) {
     playing = null;
+    if (reading.active && reading.ended) finishReading();
     quietUntil = performance.now() + 600; // não ouve o eco do fim da própria fala
     if (speechDone && uiState === 'speaking') setState('idle');
     // A expressão da última frase fica um pouco no rosto e depois relaxa.
@@ -102,6 +105,7 @@ function playNext() {
   }
   clearTimeout(relaxTimer);
   if (buf.emotion) face.setExpression(buf.emotion);
+  if (buf.meta) onReaderChunk(buf.meta);
   const src = ctx.createBufferSource();
   src.buffer = buf;
   src.connect(outAnalyser);
@@ -111,6 +115,7 @@ function playNext() {
   src.start();
 }
 function stopSpeech() {
+  if (reading.active) stopReading(true);
   playQueue.length = 0;
   if (playing) {
     playing.onended = null;
@@ -252,6 +257,22 @@ function onMessage(m) {
       break;
     case 'say':
       enqueueSpeech(m.audio, m.emotion);
+      break;
+    case 'reader_start':
+      Object.assign(reading, { active: true, ended: false, paused: false, gen: (reading.gen || 0) + 0, title: m.title, total: m.total, kind: m.kind, doc: m.doc_id, index: m.index });
+      showPlayer();
+      break;
+    case 'reader_say':
+      reading.gen = m.gen;
+      reading.total = m.total;
+      enqueueSpeech(m.audio, null, { gen: m.gen, index: m.index, text: m.text, page: m.page, total: m.total });
+      break;
+    case 'reader_end_queued':
+      reading.ended = true;
+      if (!playing && !playQueue.length) finishReading();
+      break;
+    case 'library':
+      renderLibrary(m.items);
       break;
     case 'tool':
       liveReply = null;
@@ -444,6 +465,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && !typing() && !e.repeat) { e.preventDefault(); pttDown(); }
   if (e.code === 'Escape') {
     if (!$('#settings').classList.contains('hidden')) return $('#settings').classList.add('hidden');
+    if (!$('#reader').classList.contains('hidden')) return $('#reader').classList.add('hidden');
     stopSpeech();
     send({ type: 'stop' });
     setState('idle');
@@ -651,6 +673,246 @@ async function loadTicker(refresh = false) {
   } catch {}
 }
 setInterval(() => { if (settings.ticker !== false && settings.newsflash) loadTicker(true); }, 10 * 60 * 1000);
+
+// ------------------------------------------------------------ leitor: reprodução
+const reading = { active: false, paused: false, ended: false, gen: -1, index: 0, total: 0, title: '', kind: null, doc: null, show: true };
+const queuedReaderChunks = () => playQueue.filter((b) => b.meta).length + (playing && playing.buffer?.meta ? 1 : 0);
+function onReaderChunk(meta) {
+  reading.index = meta.index;
+  reading.total = meta.total;
+  send({ type: 'reader_pos', gen: meta.gen, index: meta.index });
+  updatePlayer(meta);
+  // pede mais trechos para manter a fila sempre um pouco à frente
+  if (queuedReaderChunks() <= 2) send({ type: 'reader_need', gen: meta.gen });
+}
+function syncModalPlayer() {
+  $('#modal-player').classList.toggle('hidden', $('#player').classList.contains('hidden'));
+  $('#mp-pos').textContent = `${reading.title} · ${$('#pl-pos').textContent}`;
+  $('.mp-toggle').textContent = $('#pl-toggle').textContent === '⏸' ? '⏸ Pausar' : '▶ Continuar';
+}
+setInterval(syncModalPlayer, 400);
+function showPlayer() {
+  $('#player').classList.remove('hidden');
+  $('#pl-title').textContent = reading.title;
+  $('#pl-toggle').textContent = '⏸';
+  $('#pl-pos').textContent = 'preparando…';
+}
+function updatePlayer(meta) {
+  const pct = reading.total ? ((meta.index + 1) / reading.total) * 100 : 0;
+  $('#pl-fill').style.width = `${pct}%`;
+  $('#pl-pos').textContent = `${meta.page ? `pág. ${meta.page} · ` : ''}${meta.index + 1}/${reading.total} · ${Math.round(pct)}%`;
+  if (reading.show) {
+    $('#reading-now').classList.remove('hidden');
+    $('#reading-now').textContent = meta.text;
+  }
+  $$('#news-list li, #lib-list li').forEach((li) => li.classList.remove('now'));
+}
+function pauseReading() {
+  if (!reading.active || reading.paused) return;
+  reading.paused = true;
+  ctx?.suspend();
+  $('#pl-toggle').textContent = '▶';
+  $('#pl-pos').textContent += ' · pausado';
+}
+function resumeReading() {
+  if (reading.active && reading.paused) {
+    reading.paused = false;
+    ctx?.resume();
+    $('#pl-toggle').textContent = '⏸';
+    $('#pl-pos').textContent = $('#pl-pos').textContent.replace(' · pausado', '');
+    return;
+  }
+  if (!reading.active && reading.title) {
+    // retoma uma leitura parada a partir do último trecho
+    ctx?.resume();
+    send({ type: 'reader_seek', index: reading.index });
+  }
+}
+function stopReading(keepPosition = false) {
+  if (!reading.active) return;
+  reading.active = false;
+  reading.paused = false;
+  send({ type: 'reader_stop' });
+  reading.gen = -2;
+  playQueue.splice(0, playQueue.length, ...playQueue.filter((b) => !b.meta));
+  if (playing?.buffer?.meta) { playing.onended = null; try { playing.stop(); } catch {} playing = null; }
+  ctx?.resume();
+  $('#pl-toggle').textContent = '▶';
+  if (keepPosition) $('#pl-pos').textContent = `parado em ${reading.index + 1}/${reading.total} · ▶ continua`;
+  else $('#player').classList.add('hidden');
+  $('#reading-now').classList.add('hidden');
+}
+function finishReading() {
+  reading.active = false;
+  $('#pl-pos').textContent = 'leitura concluída';
+  $('#pl-fill').style.width = '100%';
+  $('#pl-toggle').textContent = '▶';
+  setTimeout(() => { if (!reading.active) $('#player').classList.add('hidden'); }, 6000);
+}
+function seek(delta) {
+  if (!reading.title) return;
+  const index = Math.max(0, reading.index + delta);
+  reading.active = false;
+  playQueue.splice(0, playQueue.length, ...playQueue.filter((b) => !b.meta));
+  if (playing?.buffer?.meta) { playing.onended = null; try { playing.stop(); } catch {} playing = null; }
+  ctx?.resume();
+  reading.paused = false;
+  send({ type: 'reader_seek', index });
+}
+$$('[data-pl]').forEach((b) => (b.onclick = () => {
+  const a = b.dataset.pl;
+  if (a === 'toggle') (reading.active && !reading.paused ? pauseReading : resumeReading)();
+  else if (a === 'stop') stopReading(false);
+  else if (a === 'prev') seek(-1);
+  else if (a === 'next') seek(1);
+  else if (a === 'open') openReader();
+}));
+
+// ------------------------------------------------------------ leitor: painel
+let newsData = [];
+let newsCat = 'Todas';
+function openReader(tab) {
+  $('#reader').classList.remove('hidden');
+  if (tab) selectTab(tab);
+  if (!newsData.length) loadNews();
+  loadLibrary();
+  loadReaderSettings();
+}
+function selectTab(tab) {
+  $$('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+  $$('#reader [data-pane]').forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== tab));
+}
+$$('.tabs button').forEach((b) => (b.onclick = () => selectTab(b.dataset.tab)));
+$('#open-reader').onclick = () => openReader();
+$('#quick-news').onclick = () => openReader('news');
+$('#reader-close').onclick = () => $('#reader').classList.add('hidden');
+
+async function loadNews(refresh = false) {
+  $('#news-origin').textContent = 'carregando…';
+  try {
+    const d = await (await fetch(`/api/news${refresh ? '?refresh=true' : ''}`)).json();
+    newsData = d.items || [];
+    $('#news-origin').textContent = d.items?.length ? `${d.items.length} manchetes · ${d.origem}` : 'NewsFlash indisponível ou desligado';
+  } catch { $('#news-origin').textContent = 'erro ao carregar'; }
+  renderNews();
+}
+const newsInCat = () => newsData.filter((n) => newsCat === 'Todas' || (n.categoria || 'Outras') === newsCat);
+function renderNews() {
+  const cats = ['Todas', ...new Set(newsData.map((n) => n.categoria || 'Outras'))];
+  const box = $('#news-cats');
+  box.innerHTML = '';
+  for (const c of cats) {
+    const b = document.createElement('button');
+    const count = c === 'Todas' ? newsData.length : newsData.filter((n) => (n.categoria || 'Outras') === c).length;
+    b.innerHTML = `<span></span><i>${count}</i>`;
+    b.querySelector('span').textContent = c;
+    b.classList.toggle('on', c === newsCat);
+    b.onclick = () => { newsCat = c; renderNews(); };
+    box.append(b);
+  }
+  const ul = $('#news-list');
+  ul.innerHTML = '';
+  for (const n of newsInCat()) {
+    const li = document.createElement('li');
+    li.innerHTML = `<div class="ttl"></div><div class="meta"><b></b><span></span></div><div class="sum"></div>
+      <div class="acts"><button data-a="sum">▶ Ler resumo</button><button data-a="full">▶ Matéria completa</button><button data-a="open">↗ Abrir</button></div>`;
+    li.querySelector('.ttl').textContent = n.titulo;
+    li.querySelector('.meta b').textContent = n.categoria || '';
+    li.querySelector('.meta span').textContent = `${n.fonte} · ${n.quando}`;
+    li.querySelector('.sum').textContent = n.resumo || '';
+    li.querySelector('[data-a=sum]').onclick = () => readNews([n], false, n.titulo);
+    li.querySelector('[data-a=full]').onclick = () => readNews([n], true, n.titulo);
+    li.querySelector('[data-a=open]').onclick = () => window.open(n.link, '_blank');
+    ul.append(li);
+  }
+}
+async function readNews(items, full, title) {
+  stopSpeech();
+  await ensureAudio();
+  ctx.resume();
+  send({ type: 'reader_play', source: 'news', items, full, title });
+}
+$('#news-read-all').onclick = () => readNews(newsInCat(), false, `Notícias · ${newsCat}`);
+$('#news-refresh').onclick = () => loadNews(true);
+$('#news-ask').onclick = () => {
+  $('#reader').classList.add('hidden');
+  stopSpeech();
+  const cat = newsCat === 'Todas' ? '' : ` da categoria ${newsCat}`;
+  send({ type: 'text', text: `Me dê as cinco notícias mais importantes${cat} dos meus feeds do NewsFlash, uma frase cada.` });
+};
+
+// biblioteca
+async function loadLibrary() {
+  try { renderLibrary(await (await fetch('/api/library')).json()); } catch {}
+}
+function renderLibrary(items) {
+  const ul = $('#lib-list');
+  ul.innerHTML = '';
+  if (!items.length) ul.innerHTML = '<li class="empty"><span class="note">Nenhum documento ainda. Envie um PDF, livro ou texto acima.</span></li>';
+  for (const d of items) {
+    const pct = d.total ? Math.round((d.pos / d.total) * 100) : 0;
+    const li = document.createElement('li');
+    li.innerHTML = `<div class="ttl"></div><div class="meta"><b></b><span></span></div><div class="prog"><i></i></div>
+      <div class="acts"><button data-a="cont">▶ ${d.pos ? 'Continuar' : 'Ler'}</button><button data-a="start">⏮ Do início</button>
+      <button data-a="page">↷ Ir para página</button><button data-a="ask">✦ Perguntar à IA</button><button data-a="del">✕ Remover</button></div>`;
+    li.querySelector('.ttl').textContent = d.name;
+    li.querySelector('.meta b').textContent = d.name.split('.').pop().toUpperCase();
+    li.querySelector('.meta span').textContent = `${d.pages} pág. · ${d.total} trechos · ${pct}% lido${d.warning ? ` · ⚠ ${d.warning}` : ''}`;
+    li.querySelector('.prog i').style.width = `${pct}%`;
+    const play = async (extra) => { stopSpeech(); await ensureAudio(); ctx.resume(); send({ type: 'reader_play', source: 'doc', doc: d.id, ...extra }); };
+    li.querySelector('[data-a=cont]').onclick = () => play({});
+    li.querySelector('[data-a=start]').onclick = () => play({ index: 0 });
+    li.querySelector('[data-a=page]').onclick = () => {
+      const pg = prompt(`Ir para qual página? (1 a ${d.pages})`);
+      if (pg && Number(pg) > 0) play({ page: Number(pg) });
+    };
+    li.querySelector('[data-a=ask]').onclick = () => {
+      const q = prompt('O que você quer saber sobre este documento? (deixe em branco para um resumo)') ?? null;
+      if (q === null) return;
+      $('#reader').classList.add('hidden');
+      fetch(`/api/library/${d.id}/ask`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q }) });
+    };
+    li.querySelector('[data-a=del]').onclick = () => fetch(`/api/library/${d.id}`, { method: 'DELETE' });
+    ul.append(li);
+  }
+}
+async function uploadFiles(files) {
+  for (const f of files) {
+    $('#upload-state').textContent = `Enviando e extraindo o texto de "${f.name}"…`;
+    try {
+      const r = await fetch('/api/library/upload', { method: 'POST', body: f, headers: { 'X-Filename': encodeURIComponent(f.name) } });
+      const d = await r.json();
+      $('#upload-state').textContent = r.ok ? `✔ "${d.name}" pronto: ${d.pages} páginas, ${d.total} trechos.${d.warning ? ` ⚠ ${d.warning}` : ''}` : `✖ ${d.error}`;
+    } catch (e) { $('#upload-state').textContent = `✖ Falha ao enviar: ${e.message}`; }
+  }
+  loadLibrary();
+}
+$('#upload').onchange = (e) => uploadFiles([...e.target.files]);
+const drop = $('#drop');
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); uploadFiles([...e.dataTransfer.files]); });
+
+// ajustes da leitura
+async function loadReaderSettings() {
+  const r = await (await fetch('/api/reader/settings')).json();
+  $('#r-speed').value = r.speed; $('#r-speed-v').textContent = `${r.speed}×`;
+  $('#r-voice').value = r.voice;
+  $('#r-pitch').value = r.pitch || 1; $('#r-pitch-v').textContent = r.pitch ? r.pitch.toFixed(2) : 'voz';
+  $('#r-pause').value = r.pause_ms; $('#r-pause-v').textContent = `${r.pause_ms} ms`;
+  $('#r-show').checked = reading.show;
+}
+const saveReader = (d) => fetch('/api/reader/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }).then(loadReaderSettings);
+$('#r-speed').oninput = (e) => ($('#r-speed-v').textContent = `${e.target.value}×`);
+$('#r-speed').onchange = (e) => saveReader({ speed: Number(e.target.value) });
+$('#r-voice').onchange = (e) => saveReader({ voice: e.target.value });
+$('#r-pitch').oninput = (e) => ($('#r-pitch-v').textContent = Number(e.target.value).toFixed(2));
+$('#r-pitch').onchange = (e) => saveReader({ pitch: Number(e.target.value) });
+$('#r-pause').oninput = (e) => ($('#r-pause-v').textContent = `${e.target.value} ms`);
+$('#r-pause').onchange = (e) => saveReader({ pause_ms: Number(e.target.value) });
+$('#r-show').onchange = (e) => { reading.show = e.target.checked; try { localStorage.setItem('mestre-show-text', e.target.checked ? '1' : '0'); } catch {} if (!reading.show) $('#reading-now').classList.add('hidden'); };
+try { reading.show = localStorage.getItem('mestre-show-text') !== '0'; } catch {}
+$('#r-test').onclick = () => readNews([{ fonte: 'Teste do leitor', titulo: 'Assim fica a leitura com os ajustes atuais.', resumo: 'Ajuste a velocidade, a voz, o tom e a pausa entre parágrafos até ficar confortável.' }], false, 'Teste da leitura');
 
 // ------------------------------------------------------------ telemetria e relógio
 function fmtRate(b) {

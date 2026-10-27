@@ -49,6 +49,8 @@ PERMISSIONS = {
                True, [], r'mestre-agenda'),
     'tasks': ('Autonomia', 'Tarefas em segundo plano', 'Executar trabalhos longos sozinho e avisar ao terminar.',
               True, [], r'mestre-tarefa'),
+    'vault': ('Autonomia', 'Memória no Obsidian', 'Guardar e consultar o que for importante na pasta de memória (memory_dir).',
+              True, [], None),
     'memory': ('Autonomia', 'Memória da conversa', 'Lembrar a conversa entre aberturas do MESTRE.',
                True, [], None),
 }
@@ -70,6 +72,15 @@ def disallowed_tools(perms: dict) -> list[str]:
     return tools
 
 
+def memory_dir() -> str | None:
+    try:
+        d = json.loads(CONFIG_FILE.read_text()).get('memory_dir') or ''
+    except (OSError, ValueError):
+        d = ''
+    d = str(Path(d).expanduser()) if d else ''
+    return d if d and Path(d).is_dir() else None
+
+
 def protected_pattern() -> str | None:
     try:
         paths = json.loads(CONFIG_FILE.read_text()).get('protected_paths', [])
@@ -83,6 +94,13 @@ def blocked_reason(tool: str, tool_input: dict, perms: dict) -> str | None:
     """Rótulo da permissão desligada que barra esta chamada, ou None."""
     command = str(tool_input.get('command', '')) if tool == 'Bash' else ''
     path = str(tool_input.get('file_path', '') or '')
+    mem = memory_dir()
+    if mem:
+        touches_mem = mem in command or path.startswith(mem)
+        if touches_mem and not perms.get('vault', True):
+            return 'Memória no Obsidian'
+        # a pasta de memória não conta como área protegida
+        command, path = command.replace(mem, ''), ('' if path.startswith(mem) else path)
     for k, (_, label, _, _, tools, pattern) in PERMISSIONS.items():
         if perms.get(k, True):
             continue

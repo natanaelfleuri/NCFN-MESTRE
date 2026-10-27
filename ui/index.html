@@ -59,7 +59,7 @@
     <div class="quick">
       <button data-q="Faça um resumo rápido do estado do sistema e dos meus serviços.">Estado do sistema</button>
       <button data-q="Tire uma captura da minha tela e me diga o que você vê.">O que há na tela?</button>
-      <button data-q="Quais são as principais notícias dos meus feeds do NewsFlash agora? Me dê as cinco mais importantes, uma frase cada.">Notícias</button>
+      <button id="quick-news" title="Notícias por categoria, com leitura em voz alta">Notícias</button>
       <button data-q="O que tenho na agenda?">Minha agenda</button>
     </div>
   </aside>
@@ -89,6 +89,18 @@
       </div>
     </div>
 
+    <div id="player" class="player hidden">
+      <div class="pl-info"><b id="pl-title"></b><span id="pl-pos"></span></div>
+      <div class="pl-bar"><i id="pl-fill"></i></div>
+      <div class="pl-btns">
+        <button data-pl="prev" title="Trecho anterior">⏮</button>
+        <button data-pl="toggle" id="pl-toggle" title="Pausar / continuar">⏸</button>
+        <button data-pl="stop" title="Parar a leitura">⏹</button>
+        <button data-pl="next" title="Próximo trecho">⏭</button>
+        <button data-pl="open" title="Abrir o leitor">📖</button>
+      </div>
+    </div>
+
     <div id="ticker" class="ticker hidden">
       <div class="tk-label">NEWSFLASH</div>
       <div class="tk-viewport"><div id="tk-track" class="tk-track"></div></div>
@@ -100,6 +112,7 @@
         <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-3.08A7 7 0 0 0 19 12z"/></svg>
       </button>
       <button id="stop" title="Interromper (Esc)">■</button>
+      <button id="open-reader" class="cfg" title="Notícias por categoria e biblioteca (PDF, livros)">📖 Leitor</button>
       <button id="open-settings" class="cfg" title="Configurações: voz, imagem, reconhecimento…">⚙ Configurações</button>
       <form id="typed"><input id="text" autocomplete="off" placeholder="…ou digite um comando"></form>
     </div>
@@ -122,6 +135,65 @@
         <button data-choice="deny" class="deny">Negar</button>
       </div>
       <div class="foot">Também por voz: “confirmo”, “confirmo sempre” ou “cancela”.</div>
+    </div>
+  </div>
+
+  <!-- leitor: notícias e biblioteca -->
+  <div id="reader" class="modal hidden">
+    <div class="card wide">
+      <div class="card-h">Leitor <button class="x" id="reader-close">✕</button></div>
+      <div class="tabs">
+        <button data-tab="news" class="on">Notícias</button>
+        <button data-tab="library">Biblioteca</button>
+        <button data-tab="rset">Ajustes da leitura</button>
+      </div>
+
+      <section data-pane="news">
+        <div class="cats" id="news-cats"></div>
+        <div class="row-actions">
+          <button id="news-read-all">▶ Ler resumos desta categoria</button>
+          <button id="news-ask">✦ Resumo pelo MESTRE</button>
+          <button id="news-refresh">⟳ Atualizar</button>
+          <span class="note" id="news-origin"></span>
+        </div>
+        <ul id="news-list" class="items"></ul>
+      </section>
+
+      <section data-pane="library" class="hidden">
+        <label id="drop" class="drop">
+          <input id="upload" type="file" accept=".pdf,.epub,.docx,.txt,.md,.html,.htm" multiple>
+          <b>⬆ Enviar livro ou documento</b>
+          <span>Clique ou arraste aqui · PDF, EPUB, DOCX, TXT, MD, HTML (até 200 MB)</span>
+        </label>
+        <div class="note" id="upload-state"></div>
+        <ul id="lib-list" class="items"></ul>
+      </section>
+
+      <section data-pane="rset" class="hidden">
+        <div class="rset">
+          <label>Velocidade <input id="r-speed" type="range" min="0.6" max="1.6" step="0.05"><b id="r-speed-v"></b></label>
+          <label>Voz <select id="r-voice">
+            <option value="auto">Mesma do MESTRE</option>
+            <option value="pm_alex">Alex (masculina)</option>
+            <option value="pm_santa">Santa (masculina, encorpada)</option>
+            <option value="pf_dora">Dora (feminina)</option>
+            <option value="piper-faber">Faber (Piper)</option>
+          </select></label>
+          <label>Tom <input id="r-pitch" type="range" min="0.75" max="1.15" step="0.01"><b id="r-pitch-v"></b></label>
+          <label>Pausa entre parágrafos <input id="r-pause" type="range" min="0" max="2000" step="50"><b id="r-pause-v"></b></label>
+          <label class="chk"><input id="r-show" type="checkbox"> Mostrar o trecho que está sendo lido</label>
+          <div class="note">O tom "0" usa o da voz escolhida. A posição de cada livro é salva: "Continuar" retoma de onde parou.</div>
+          <button id="r-test">Testar leitura</button>
+        </div>
+      </section>
+      <div id="modal-player" class="modal-player hidden">
+        <span id="mp-pos"></span>
+        <button data-pl="prev" title="Trecho anterior">⏮</button>
+        <button data-pl="toggle" class="mp-toggle" title="Pausar / continuar">⏸ Pausar</button>
+        <button data-pl="stop" title="Parar a leitura">⏹ Parar</button>
+        <button data-pl="next" title="Próximo trecho">⏭</button>
+      </div>
+      <div id="reading-now" class="reading-now hidden"></div>
     </div>
   </div>
 

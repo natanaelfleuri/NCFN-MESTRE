@@ -27,6 +27,7 @@ from pathlib import Path
 import news
 import numpy as np
 import permissions
+import reader
 import psutil
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -169,13 +170,18 @@ def wav_bytes(samples: np.ndarray, rate: int) -> bytes:
     return pcm_to_wav(pcm, rate)
 
 
-def synthesize(text: str) -> bytes:
+def synthesize(text: str, voice: str | None = None, pitch: float | None = None, speed: float | None = None,
+               tail_ms: int = 0) -> bytes:
     """Fala com o perfil da voz atual. O tom grave vem de tocar o áudio numa
     taxa menor (pitch < 1), com a fala gerada mais rápida na mesma proporção
     para a duração não mudar."""
-    prof = voice_profile()
-    pitch = prof.get('pitch', 1.0)
-    speed = prof.get('speed', 1.0)
+    prof = dict(voice_profile())
+    if voice:
+        prof['voice'] = voice
+        prof['engine'] = 'piper' if voice.startswith('piper') else 'kokoro'
+    pitch = pitch or prof.get('pitch', 1.0)
+    speed = speed or prof.get('speed', 1.0)
+    silence = np.zeros(int(24000 * tail_ms / 1000), dtype=np.float32)
     if prof.get('voice', '').startswith('piper'):
         prof = {**prof, 'engine': 'piper'}
     if prof.get('engine', 'kokoro') == 'kokoro':
@@ -183,7 +189,7 @@ def synthesize(text: str) -> bytes:
             parts = [a.numpy() if hasattr(a, 'numpy') else a
                      for _, _, a in kokoro()(text, voice=prof['voice'], speed=speed / pitch)]
             audio = np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
-            return wav_bytes(audio, int(24000 * pitch))
+            return wav_bytes(np.concatenate([audio, silence]), int(24000 * pitch))
         except Exception as e:
             print('[tts] Kokoro falhou, usando Piper:', e, flush=True)
     from piper import SynthesisConfig
@@ -192,6 +198,7 @@ def synthesize(text: str) -> bytes:
         piper().synthesize_wav(text, w, syn_config=SynthesisConfig(length_scale=0.95 * pitch))
     with wave.open(io.BytesIO(buf.getvalue())) as r:
         rate, frames = r.getframerate(), r.readframes(r.getnframes())
+    frames += b'\x00\x00' * int(rate * tail_ms / 1000)
     return pcm_to_wav(frames, int(rate * pitch))
 
 
@@ -221,10 +228,31 @@ def persona_prompt():
     local = ROOT / 'persona.local.md'  # contexto pessoal, fora do git
     if local.exists():
         base += '\n\n' + local.read_text()
+    base += memory_prompt()
     if CONFIG.get('gender') == 'feminino':
         base += ('\n\n## Gênero\nNesta configuração sua voz e seu rosto são femininos: fale de si no '
                  'feminino ("estou pronta", "fiquei curiosa"). Seu nome continua MESTRE.\n')
     return base
+
+
+def memory_prompt() -> str:
+    """Memória de longo prazo (pasta do Obsidian): onde fica e o que já se sabe."""
+    mem = permissions.memory_dir()
+    if not mem or not permissions.current().get('vault', True):
+        return ''
+    d = Path(mem)
+    parts = [f'\n\n## Sua memória de longo prazo\n\nPasta: `{mem}` (cofre Obsidian do usuário). '
+             'É a ÚNICA memória que você deve usar para guardar coisas: não grave no sistema de memória interno '
+             'do Claude Code (~/.claude/projects/.../memory), mesmo que outras instruções sugiram. '
+             'As regras de uso estão na seção "Memória" acima. Conteúdo atual das notas principais:\n']
+    for name in ('00 - ÍNDICE.md', 'SOBRE O USUÁRIO.md'):
+        f = d / name
+        if f.exists():
+            parts.append(f'\n### {name}\n\n{f.read_text()[:4000]}\n')
+    conv = d / 'CONVERSAS.md'
+    if conv.exists() and conv.stat().st_size:
+        parts.append(f'\n### CONVERSAS.md (final)\n\n…{conv.read_text()[-2500:]}\n')
+    return ''.join(parts)
 
 
 def claude_settings_file():
@@ -683,6 +711,17 @@ async def agenda_loop():
             await broadcast({'type': 'agenda', 'items': items})
 
 
+async def split_loop():
+    """Fechou a janela aberta ao lado? O MESTRE volta à tela cheia."""
+    split = Path(f'/tmp/mestre-split-{os.getuid()}.json')
+    while True:
+        await asyncio.sleep(3)
+        if split.exists():
+            proc = await asyncio.create_subprocess_exec(str(ROOT / 'bin' / 'mestre-pc'), 'split-check', env=claude_env(),
+                                                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
+
+
 # ================================================================ autonomia: vigilância
 def http_ok(url):
     import urllib.error
@@ -747,12 +786,136 @@ async def watch_loop():
                     baseline.discard(key.split(':', 1)[1])
 
 
+# ================================================================ leitor (livros e notícias)
+READER_DEFAULTS = {'speed': 1.0, 'voice': 'auto', 'pitch': 0, 'pause_ms': 350, 'ahead': 2}
+
+
+def reader_settings():
+    return {**READER_DEFAULTS, **CONFIG.get('reader', {})}
+
+
+class Reader:
+    """Uma leitura por vez. O servidor manda os trechos sob demanda ('reader_need'),
+    sempre alguns à frente do que está tocando; a posição de cada livro fica salva."""
+
+    def __init__(self):
+        self.gen = 0
+        self.source = None  # {'kind': 'doc'|'news', 'title', 'doc_id'?}
+        self.items: list[dict] = []
+        self.next = 0
+        self.lock = asyncio.Lock()
+
+    def state(self):
+        return {'title': self.source['title'] if self.source else '', 'total': len(self.items),
+                'kind': self.source['kind'] if self.source else None,
+                'doc_id': (self.source or {}).get('doc_id')}
+
+    async def start(self, source: dict, items: list[dict], index: int = 0):
+        self.gen += 1
+        self.source, self.items = source, items
+        self.next = max(0, min(index, len(items)))
+        mouth.stop()
+        await broadcast({'type': 'reader_start', **self.state(), 'index': self.next})
+        for _ in range(reader_settings()['ahead']):
+            await self.feed(self.gen)
+
+    async def feed(self, gen):
+        async with self.lock:
+            if gen != self.gen or self.next >= len(self.items):
+                if gen == self.gen and self.next >= len(self.items) and self.items:
+                    await broadcast({'type': 'reader_end_queued'})
+                return
+            i = self.next
+            self.next += 1
+            item = self.items[i]
+            if item.get('fetch'):  # matéria completa: baixa na hora
+                try:
+                    text = await asyncio.get_running_loop().run_in_executor(None, news.read_article, item['fetch'])
+                except Exception as e:
+                    text = f'Não consegui abrir a matéria: {e}'
+                extra = reader.chunk([(0, text)])
+                self.items[i:i + 1] = [{'t': item['t']}] + extra
+                item = self.items[i]
+            cfg = reader_settings()
+            voice = None if cfg['voice'] == 'auto' else cfg['voice']
+            try:
+                audio = await asyncio.get_running_loop().run_in_executor(
+                    TTS_POOL, lambda: synthesize(speakable(item['t']), voice=voice, pitch=cfg['pitch'] or None,
+                                                 speed=cfg['speed'], tail_ms=cfg['pause_ms'] if item.get('end') else 80))
+            except Exception as e:
+                print('[leitor]', e, flush=True)
+                return
+            if gen != self.gen:
+                return
+            await broadcast({'type': 'reader_say', 'gen': gen, 'index': i, 'total': len(self.items),
+                             'text': item['t'], 'page': item.get('p'), 'audio': base64.b64encode(audio).decode()})
+
+    def stop(self):
+        self.gen += 1
+
+    def position(self, index):
+        if self.source and self.source.get('doc_id'):
+            reader.set_pos(self.source['doc_id'], index)
+
+
+reading: Reader | None = None
+
+
+def news_items(items, full=False):
+    out = []
+    for it in items:
+        head = f"{it.get('fonte', '')}. {it.get('titulo', '')}."
+        if full:
+            out.append({'t': head, 'fetch': it.get('link'), 'end': True})
+        else:
+            out.append({'t': f"{head} {it.get('resumo', '')}".strip(), 'end': True})
+    return out
+
+
+async def handle_reader(data):
+    kind = data.get('type')
+    if kind == 'reader_play':
+        if data.get('source') == 'doc':
+            doc = reader.get(data.get('doc'))
+            if not doc:
+                return
+            parts = await asyncio.get_running_loop().run_in_executor(None, reader.chunks_of, doc)
+            start = data.get('index')
+            if data.get('page'):
+                start = reader.index_of_page(doc, int(data['page']))
+            if start is None:
+                start = doc.get('pos', 0) if doc.get('pos', 0) < len(parts) else 0
+            await reading.start({'kind': 'doc', 'doc_id': doc['id'], 'title': doc['name']}, parts, int(start))
+        elif data.get('source') == 'news':
+            items = news_items(data.get('items') or [], full=bool(data.get('full')))
+            title = data.get('title') or 'Notícias'
+            await reading.start({'kind': 'news', 'title': title}, items, 0)
+    elif kind == 'reader_need':
+        if data.get('gen') == reading.gen:
+            await reading.feed(reading.gen)
+    elif kind == 'reader_pos':
+        if data.get('gen') == reading.gen:
+            reading.position(int(data.get('index', 0)))
+    elif kind == 'reader_seek':
+        if not reading.source:
+            return
+        index = int(data.get('index', 0))
+        if reading.source['kind'] == 'doc' and data.get('page'):
+            doc = reader.get(reading.source['doc_id'])
+            index = reader.index_of_page(doc, int(data['page']))
+        await reading.start(reading.source, reading.items, max(0, index))
+    elif kind == 'reader_stop':
+        reading.stop()
+
+
 # ================================================================ HTTP
 @app.on_event('startup')
 async def startup():
     global mouth, brain
+    global reading
     mouth = Mouth()
     brain = Brain(on_brain)
+    reading = Reader()
     loop = asyncio.get_running_loop()
     if CONFIG.get('stt') != 'openai':
         loop.run_in_executor(STT_POOL, whisper)
@@ -760,6 +923,7 @@ async def startup():
     await brain.start()
     asyncio.create_task(agenda_loop())
     asyncio.create_task(watch_loop())
+    asyncio.create_task(split_loop())
 
 
 @app.get('/')
@@ -938,8 +1102,72 @@ async def news_headlines(refresh: bool = False):
     except Exception as e:
         return {'items': [], 'origem': f'erro: {e}'}
     return {'origem': origem, 'items': [{'titulo': i['titulo'], 'fonte': i.get('fonte', ''), 'link': i['link'],
-                                         'categoria': i.get('categoria', ''), 'quando': news.when(i['data'])}
+                                         'categoria': i.get('categoria', ''), 'quando': news.when(i['data']),
+                                         'resumo': i.get('resumo', '')}
                                         for i in items]}
+
+
+@app.get('/api/library')
+async def library_list():
+    return reader.documents()
+
+
+@app.post('/api/library/upload')
+async def library_upload(req: Request):
+    from urllib.parse import unquote
+    name = unquote(req.headers.get('x-filename', 'documento.txt'))
+    data = await req.body()
+    if len(data) > 200 * 1024 * 1024:
+        return JSONResponse({'error': 'Arquivo maior que 200 MB.'}, status_code=413)
+    try:
+        doc = await asyncio.get_running_loop().run_in_executor(None, reader.add, name, data)
+    except Exception as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    await broadcast({'type': 'library', 'items': reader.documents()})
+    return doc
+
+
+@app.delete('/api/library/{doc_id}')
+async def library_remove(doc_id: str):
+    if reading.source and reading.source.get('doc_id') == doc_id:
+        reading.stop()
+    reader.remove(doc_id)
+    await broadcast({'type': 'library', 'items': reader.documents()})
+    return {'ok': True}
+
+
+@app.post('/api/library/{doc_id}/ask')
+async def library_ask(doc_id: str, req: Request):
+    """Entrega o documento ao cérebro: ler, resumir ou responder perguntas."""
+    doc = reader.get(doc_id)
+    if not doc:
+        return JSONResponse({'ok': False}, status_code=404)
+    q = ((await req.json()) or {}).get('question') or 'Leia este documento e me diga em poucas frases do que se trata.'
+    await send_to_brain(f'Documento da biblioteca: "{doc["name"]}" ({doc["pages"]} páginas). Arquivo original: '
+                        f'{doc["path"]}. Texto extraído (com marcações de página): {doc["text"]}. '
+                        f'Use o texto extraído (leia em partes se for grande). Pedido: {q}')
+    return {'ok': True}
+
+
+@app.get('/api/reader/settings')
+async def reader_get():
+    return reader_settings()
+
+
+@app.post('/api/reader/settings')
+async def reader_set(req: Request):
+    d = await req.json()
+    cfg = CONFIG.setdefault('reader', {})
+    if isinstance(d.get('speed'), (int, float)) and 0.5 <= d['speed'] <= 2:
+        cfg['speed'] = round(float(d['speed']), 2)
+    if isinstance(d.get('pitch'), (int, float)) and (d['pitch'] == 0 or 0.7 <= d['pitch'] <= 1.2):
+        cfg['pitch'] = round(float(d['pitch']), 2)
+    if isinstance(d.get('pause_ms'), int) and 0 <= d['pause_ms'] <= 3000:
+        cfg['pause_ms'] = d['pause_ms']
+    if d.get('voice') in ('auto', 'pm_alex', 'pm_santa', 'pf_dora', 'piper-faber'):
+        cfg['voice'] = d['voice']
+    save_config()
+    return reader_settings()
 
 
 @app.get('/api/agenda')
@@ -1023,6 +1251,8 @@ async def ws_endpoint(ws: WebSocket):
             kind = data.get('type')
             if kind == 'text':
                 await handle_utterance(data.get('text', ''), 'typed')
+            elif kind and kind.startswith('reader_'):
+                await handle_reader(data)
             elif kind == 'decision':
                 await decide_pending(data.get('choice', 'deny'))
             elif kind == 'stop':

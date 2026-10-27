@@ -86,6 +86,20 @@ def touches_protected(text):
     return None
 
 
+def memory_dir():
+    try:
+        d = json.load(open(os.path.join(ROOT, 'config.json'))).get('memory_dir') or ''
+    except (OSError, ValueError):
+        return None
+    d = os.path.expanduser(d)
+    return d if d and os.path.isdir(d) else None
+
+
+def in_memory(path):
+    mem = memory_dir()
+    return bool(mem and path and os.path.abspath(os.path.expanduser(path)).startswith(mem))
+
+
 def danger(tool, ti):
     """Motivo para pedir confirmação, ou None quando a ação é segura."""
     if tool == 'Bash':
@@ -93,12 +107,17 @@ def danger(tool, ti):
         for pattern, why in DANGEROUS_BASH:
             if re.search(pattern, cmd):
                 return why
-        p = touches_protected(cmd)
+        mem = memory_dir()
+        p = touches_protected(cmd.replace(mem, '') if mem else cmd)
         if p:
             return f'tocar em área protegida ({os.path.basename(p.rstrip("/")) or p})'
         return None
     if tool in ('Write', 'Edit', 'NotebookEdit', 'MultiEdit'):
         path = os.path.abspath(os.path.expanduser(str(ti.get('file_path') or ti.get('notebook_path') or '')))
+        if memory_dir() and path.startswith(os.path.join(HOME, '.claude')):
+            return 'MEMORIA_ERRADA'
+        if in_memory(path):
+            return None  # memória do assistente: escreve sem perguntar
         if touches_protected(path):
             return 'alterar arquivo em área protegida'
         if path.startswith(WORKSPACE) or path.startswith('/tmp/'):
@@ -106,6 +125,8 @@ def danger(tool, ti):
         return f'alterar o arquivo {path}'
     if tool == 'Read':
         path = str(ti.get('file_path', ''))
+        if in_memory(path):
+            return None
         p = touches_protected(path)
         if p and not path.endswith(('.md', '.txt', '.pdf', '.png', '.jpg')):
             return 'ler um arquivo sensível'
@@ -145,6 +166,9 @@ def main():
     why = danger(tool, ti)
     if not why:
         decide('allow')
+    if why == 'MEMORIA_ERRADA':
+        decide('deny', f'Não use a memória interna do Claude Code (~/.claude). A memória do MESTRE é a pasta '
+                       f'{memory_dir()} (Obsidian): grave lá com Write/Edit, seguindo as regras da seção Memória.')
     fp = fingerprint(tool, ti)
     match = str(ti.get('command') or ti.get('file_path') or ti.get('notebook_path') or json.dumps(ti, ensure_ascii=False))
     # "Confirmar sempre": a mesma ação exata passa sem perguntar de novo.

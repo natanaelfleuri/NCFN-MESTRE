@@ -35,5 +35,6 @@
     "~/projetos/sistema-importante",
     "COFRE"
   ],
-  "ticker": true
+  "ticker": true,
+  "memory_dir": "~/Documentos/Obsidian/MEMÓRIA DO ASSISTENTE"
 }
