@@ -23,6 +23,7 @@ Um **guardião** fica entre o cérebro e o computador e pede confirmação antes
 - [Configurações](#configurações)
 - [Segurança](#segurança)
 - [Autonomia: agenda, tarefas e vigilância](#autonomia-agenda-tarefas-e-vigilância)
+- [Central: arquivos, programas e fluxos](#central-arquivos-programas-e-fluxos)
 - [Uso online: janela suspensa num portal web](#uso-online-janela-suspensa-num-portal-web)
 - [Estrutura do projeto](#estrutura-do-projeto)
 - [Personalização](#personalização)
@@ -305,6 +306,45 @@ Se o leitor de RSS [NewsFlash](https://flathub.org/apps/io.gitlab.news_flash.New
 
 ---
 
+## Central: arquivos, programas e fluxos
+
+O botão **▦ Central** abre três abas:
+
+**Meus arquivos.** Retrato das pastas pessoais (Documentos, Downloads, Área de
+trabalho, Imagens…): arquivos e tamanho por pasta, quanto foi mexido em 30
+dias, espaço por tipo (documentos, imagens, máquinas virtuais, compactados…),
+arquivos grandes, duplicados (mesmo conteúdo), nomes de cópia ("(1)",
+"cópia", "Sem título"), pastas vazias e downloads esquecidos. Daí saem
+**sugestões** com prioridade; cada uma tem **▶ Pedir ao MESTRE**, que manda o
+pedido pronto para a conversa (mover e apagar continuam pedindo
+confirmação). **✦ Análise completa** pede ao Claude um diagnóstico com
+estrutura de pastas recomendada, convenção de nomes e hábitos. A varredura é
+só leitura e fica em cache por 6 h (**⟳ Escanear de novo** refaz).
+
+**Programas.** Tudo o que aparece no menu de aplicativos (atalhos do
+sistema, do usuário, Flatpak e Snap) e os pacotes do sistema instalados
+manualmente (apt), com categoria, origem e descrição. **✦ Explicar com IA**
+gera para cada um: o que faz, 3 a 5 capacidades concretas e uma dica de uso
+(em lotes, guardado em `state/central-apps-ai.json`). Busca por nome ou
+função, filtro por categoria, **▶ Abrir** e **? Perguntar** ao MESTRE.
+
+**Integração e fluxos.** Encontra os projetos (repositórios git, apps
+Node/Python, composições Docker, cofres do Obsidian) com branch, alterações
+sem commit, commits não enviados e último commit; **✦ Estado e próximos
+passos** pede a análise de um projeto. Os **fluxos de produtividade** são
+pedidos completos que o MESTRE executa: *Triagem de Downloads*, *Foco do
+dia* (Agenda + Gmail + projetos), *Painel de projetos*, *Proteção de
+projetos*, *Revisão semanal (GTD)* com nota no Obsidian, *Projetos ↔
+Segundo Cérebro*, *Espaço em disco* e *Documentos novos → resumo*. Cada fluxo
+pode rodar **agora** (na conversa, com confirmações), **em segundo plano**
+(ações protegidas ficam pendentes no relatório) ou ser **agendado** (todo
+dia, dias úteis ou toda semana, no horário escolhido — vira uma tarefa da
+agenda). **✦ Sugerir fluxos para mim** cria fluxos sob medida a partir dos
+seus projetos e pastas, e **+ Criar fluxo próprio** junta os projetos
+marcados com a sua instrução (`state/flows.json`).
+
+---
+
 ## Uso online: janela suspensa num portal web
 
 O MESTRE pode atender dentro de um portal web seu (no caso do autor, o portal
@@ -402,9 +442,10 @@ bin/mestre-noticias  notícias dos feeds do NewsFlash
 bin/ncfn-tela        ações na página do portal aberta na janela suspensa
 portal.py            ponte online: ouvinte na rede Docker, token do Cloudflare Access, repasse
 persona_portal.md    persona do cérebro que atende dentro do portal
+central.py           Central: retrato dos arquivos, programas instalados, projetos e fluxos
 news.py              leitura do NewsFlash e dos feeds RSS/Atom
 reader.py            biblioteca: extração de PDF/EPUB/DOCX/TXT e trechos para leitura
-ui/                  interface: index.html, style.css, app.js, symbol.js (símbolo NCFN)
+ui/                  interface: index.html, style.css, app.js, central.js, symbol.js (símbolo NCFN)
 install/             modelos do serviço systemd, do lançador e do atalho
 config.example.json  configuração inicial (vira config.json)
 state/               chaves, sessão, permissões e agenda (ignorado pelo git)
@@ -426,6 +467,7 @@ APIs HTTP:
 - `GET /api/news` (manchetes do NewsFlash);
 - `GET /api/library`, `POST /api/library/upload` (corpo = arquivo, cabeçalho `X-Filename`), `DELETE /api/library/{id}`, `POST /api/library/{id}/ask`;
 - `GET/POST /api/reader/settings`;
+- Central: `GET /api/central/files|apps|projects|flows`, `POST /api/central/files/analyze`, `POST /api/central/apps/explain`, `POST /api/central/flows` (criar), `POST /api/central/flows/suggest`, `POST /api/central/flows/{id}/run|schedule`, `DELETE /api/central/flows/{id}`, `POST /api/central/open|launch`;
 - `POST /api/window/{minimize|maximize|close}`;
 - `POST /api/portal/cmd` (só local, usado pelo `ncfn-tela`) e `WS /portal/ws` (janela do portal: `page`, `text`, áudio, `voice`, `cmd_result`, `stop`, `reset` ↔ `hello`, `status`, `user`, `delta`, `tool`, `say`, `cmd`, `done`).
 

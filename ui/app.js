@@ -1,4 +1,5 @@
 import { createFace } from './symbol.js';
+import { initCentral } from './central.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -319,6 +320,10 @@ function onMessage(m) {
       break;
     case 'agenda':
       renderAgenda(m.items);
+      central.onAgenda();
+      break;
+    case 'central':
+      central.onMessage(m);
       break;
     case 'reset':
       log.innerHTML = '';
@@ -826,10 +831,10 @@ function openReader(tab) {
   loadReaderSettings();
 }
 function selectTab(tab) {
-  $$('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+  $$('#reader .tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
   $$('#reader [data-pane]').forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== tab));
 }
-$$('.tabs button').forEach((b) => (b.onclick = () => selectTab(b.dataset.tab)));
+$$('#reader .tabs button').forEach((b) => (b.onclick = () => selectTab(b.dataset.tab)));
 $('#open-reader').onclick = () => openReader();
 $('#quick-news').onclick = () => openReader('news');
 $('#reader-close').onclick = () => $('#reader').classList.add('hidden');
@@ -1037,5 +1042,6 @@ async function start() {
   send({ type: 'greet' });
 }
 $('#start').onclick = start;
+const central = initCentral({ send, stopSpeech, addLog });
 boot().then(() => { if (new URLSearchParams(location.search).has('auto')) start(); });
 connect();

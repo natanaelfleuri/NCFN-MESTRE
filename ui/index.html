@@ -115,6 +115,7 @@
       </button>
       <button id="stop" title="Interromper (Esc)">■</button>
       <button id="open-reader" class="cfg" title="Notícias por categoria e biblioteca (PDF, livros)">📖 Leitor</button>
+      <button id="open-central" class="cfg" title="Arquivos, programas instalados e fluxos de produtividade">▦ Central</button>
       <button id="open-settings" class="cfg" title="Configurações: voz, imagem, reconhecimento…">⚙ Configurações</button>
       <form id="typed"><input id="text" autocomplete="off" placeholder="…ou digite um comando"></form>
     </div>
@@ -137,6 +138,63 @@
         <button data-choice="deny" class="deny">Negar</button>
       </div>
       <div class="foot">Também por voz: “confirmo”, “confirmo sempre” ou “cancela”.</div>
+    </div>
+  </div>
+
+  <!-- central: arquivos, programas e integração -->
+  <div id="central" class="modal hidden">
+    <div class="card wide xl">
+      <div class="card-h">Central <button class="x" id="central-close">✕</button></div>
+      <div class="tabs" id="central-tabs">
+        <button data-ctab="files" class="on">Meus arquivos</button>
+        <button data-ctab="apps">Programas</button>
+        <button data-ctab="flows">Integração e fluxos</button>
+      </div>
+
+      <section data-cpane="files">
+        <div class="row-actions">
+          <button id="cf-scan">⟳ Escanear de novo</button>
+          <button id="cf-ai">✦ Análise completa pelo MESTRE</button>
+          <span class="note" id="cf-note"></span>
+        </div>
+        <div class="tiles" id="cf-folders"></div>
+        <div class="typebar" id="cf-types"></div>
+        <h3 class="sub">Sugestões de organização e produtividade</h3>
+        <ul class="items" id="cf-sugs"></ul>
+        <div class="ai-box hidden" id="cf-ai-box"></div>
+        <details class="det"><summary id="cf-big-h">Arquivos grandes</summary><ul class="items" id="cf-big"></ul></details>
+        <details class="det"><summary id="cf-dup-h">Duplicados</summary><ul class="items" id="cf-dup"></ul></details>
+        <details class="det"><summary id="cf-copy-h">Nomes de cópia ou genéricos</summary><ul class="items" id="cf-copy"></ul></details>
+      </section>
+
+      <section data-cpane="apps" class="hidden">
+        <div class="row-actions">
+          <div class="seg" id="ca-src"><button data-src="apps" class="on">Aplicativos</button><button data-src="pacotes">Pacotes do sistema</button></div>
+          <input id="ca-q" class="search" placeholder="Buscar programa ou função…">
+          <button id="ca-explain">✦ Explicar todos com IA</button>
+          <span class="note" id="ca-note"></span>
+        </div>
+        <div class="cats" id="ca-cats"></div>
+        <ul class="items tall" id="ca-list"></ul>
+      </section>
+
+      <section data-cpane="flows" class="hidden">
+        <h3 class="sub">Projetos e pastas <button class="mini" id="cp-scan">⟳</button> <span class="note" id="cp-note"></span></h3>
+        <div class="projects" id="cp-list"></div>
+        <h3 class="sub">Fluxos de produtividade <button class="mini" id="fl-suggest">✦ Sugerir fluxos para mim</button></h3>
+        <ul class="items" id="fl-sugg"></ul>
+        <ul class="items flows" id="fl-list"></ul>
+        <details class="det" id="fl-new-box"><summary>+ Criar fluxo próprio</summary>
+          <form id="fl-new" class="flow-form">
+            <input name="nome" placeholder="Nome do fluxo (ex.: Fechamento do mês)" required>
+            <input name="descricao" placeholder="Para que serve (opcional)">
+            <textarea name="pedido" rows="4" placeholder="O que o MESTRE deve fazer, passo a passo. Ex.: junte os PDFs de notas fiscais de Downloads, renomeie por data e fornecedor, mova para Documentos/Financeiro/AAAA-MM e me mande o total." required></textarea>
+            <div class="note" id="fl-new-paths">Marque projetos acima para incluí-los no fluxo.</div>
+            <label>Repetir <select name="repetir"><option value="">Não agendar</option><option value="diario">Todo dia</option><option value="dias-uteis">Dias úteis</option><option value="semanal">Toda semana</option></select></label>
+            <button type="submit">Salvar fluxo</button>
+          </form>
+        </details>
+      </section>
     </div>
   </div>
 

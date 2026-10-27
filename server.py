@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import central
 import news
 import numpy as np
 import permissions
@@ -981,6 +982,286 @@ async def handle_reader(data):
         await reading.start(reading.source, reading.items, max(0, index))
     elif kind == 'reader_stop':
         reading.stop()
+
+
+# ================================================================ central: arquivos, programas, integração
+CENTRAL_FILES = STATE / 'central-files.json'
+CENTRAL_PROJECTS = STATE / 'central-projects.json'
+CENTRAL_APPS_AI = STATE / 'central-apps-ai.json'
+CENTRAL_FILES_AI = STATE / 'central-files-ai.json'
+FLOWS = STATE / 'flows.json'
+SCAN_POOL = ThreadPoolExecutor(max_workers=2)
+central_jobs: dict[str, dict] = {}
+
+
+def read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+async def ask_ai(prompt: str, timeout=600) -> str:
+    """Pergunta avulsa ao Claude, sem ferramentas (análises e explicações da Central)."""
+    cmd = ['claude', '-p', prompt, '--output-format', 'json', '--tools', '', '--strict-mcp-config',
+           '--model', CONFIG.get('central_model', 'sonnet')]
+    proc = await asyncio.create_subprocess_exec(*cmd, cwd=str(STATE), env=claude_env(),
+                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    d = json.loads(out or b'{}')
+    if d.get('is_error'):
+        raise RuntimeError(str(d.get('result'))[:200])
+    return (d.get('result') or '').strip()
+
+
+def json_in(text: str):
+    """Primeiro objeto/lista JSON dentro de uma resposta."""
+    m = re.search(r'```(?:json)?\s*(.+?)```', text, re.S)
+    text = m.group(1) if m else text
+    start = min([i for i in (text.find('{'), text.find('[')) if i != -1], default=-1)
+    if start == -1:
+        raise ValueError('sem JSON na resposta')
+    return json.JSONDecoder().raw_decode(text[start:])[0]
+
+
+async def cached_scan(path: Path, fn, refresh: bool, max_age: float):
+    data = read_json(path, None)
+    if refresh or not data or time.time() - data.get('_at', 0) > max_age:
+        result = await asyncio.get_running_loop().run_in_executor(SCAN_POOL, fn)
+        data = {'_at': time.time(), 'data': result}
+        path.write_text(json.dumps(data, ensure_ascii=False))
+    return data
+
+
+@app.get('/api/central/files')
+async def central_files(refresh: bool = False):
+    d = await cached_scan(CENTRAL_FILES, central.scan_files, refresh, 6 * 3600)
+    return {**d['data'], 'analise': read_json(CENTRAL_FILES_AI, None)}
+
+
+@app.post('/api/central/files/analyze')
+async def central_files_analyze():
+    r = (await cached_scan(CENTRAL_FILES, central.scan_files, False, 6 * 3600))['data']
+    h = central.human
+    resumo = {
+        'pastas': {k: f"{v['arquivos']} arquivos, {h(v['tamanho'])}, {v['recentes_30d']} mexidos em 30 dias" for k, v in r['pastas'].items()},
+        'tipos': {k: f"{v['arquivos']} arquivos, {h(v['tamanho'])}" for k, v in r['tipos'].items()},
+        'grandes': [f"{b['caminho'].replace(str(HOME), '~')} ({h(b['tamanho'])})" for b in r['grandes'][:12]],
+        'duplicados': f"{r['duplicados_total']} grupos, {h(r['duplicados_espaco'])}",
+        'nomes_de_copia': [Path(c).name for c in r['copias'][:25]],
+        'pastas_vazias': r['vazias_total'], 'downloads_antigos': r['downloads_antigos'],
+        'soltos_na_home': r['soltos_home'], 'area_de_trabalho': r['soltos_area_trabalho'],
+    }
+    try:
+        top = await asyncio.get_running_loop().run_in_executor(None, lambda: sorted(
+            (e.name for p in central.user_dirs().values() for e in os.scandir(p) if e.is_dir() and not e.name.startswith('.')))[:120])
+    except Exception:
+        top = []
+    prompt = ('Você é um consultor de organização digital e produtividade. Abaixo está o retrato das pastas pessoais de um '
+              'usuário Linux (perito forense e desenvolvedor, usa Obsidian como segundo cérebro). Escreva em português do Brasil '
+              'uma análise prática em markdown simples (títulos ##, listas curtas), com: 1) diagnóstico em 3 linhas; '
+              '2) as 5 melhorias de organização mais valiosas, cada uma com o passo concreto; 3) uma estrutura de pastas '
+              'recomendada (árvore curta) adaptada ao que existe; 4) convenção de nomes; 5) 3 hábitos/automações de '
+              'produtividade. Seja específico com os nomes reais. Não invente dados.\n\n'
+              f'RETRATO: {json.dumps(resumo, ensure_ascii=False)}\n\nSUBPASTAS DE PRIMEIRO NÍVEL: {json.dumps(top, ensure_ascii=False)}')
+    try:
+        text = await ask_ai(prompt)
+    except Exception as e:
+        return JSONResponse({'error': f'Falha na análise: {e}'}, status_code=500)
+    data = {'quando': time.time(), 'texto': text}
+    CENTRAL_FILES_AI.write_text(json.dumps(data, ensure_ascii=False))
+    return data
+
+
+@app.get('/api/central/apps')
+async def central_apps():
+    loop = asyncio.get_running_loop()
+    apps, pkgs = await asyncio.gather(loop.run_in_executor(SCAN_POOL, central.programs),
+                                      loop.run_in_executor(SCAN_POOL, central.packages))
+    return {'apps': apps, 'pacotes': pkgs, 'ia': read_json(CENTRAL_APPS_AI, {}),
+            'job': central_jobs.get('apps')}
+
+
+async def explain_apps(items: list[dict]):
+    job = central_jobs['apps'] = {'feitos': 0, 'total': len(items), 'rodando': True, 'erro': None}
+    await broadcast({'type': 'central', 'what': 'apps', 'job': job})
+    batches = [items[i:i + 20] for i in range(0, len(items), 20)]
+    sem = asyncio.Semaphore(2)
+
+    async def one(batch):
+        lista = [{'id': a['key'], 'nome': a['nome'], 'descricao': a.get('descricao', ''), 'tipo': a.get('tipo'),
+                  'categorias': a.get('categorias') or a.get('secao'), 'comando': a.get('exec', '')} for a in batch]
+        prompt = ('Explique cada programa instalado neste Linux (Ubuntu/Zorin) para o dono do computador, em português do '
+                  'Brasil. Responda SOMENTE com um objeto JSON: chave = id exato; valor = {"faz": "o que é e para que '
+                  'serve, 1-2 frases", "capacidades": ["3 a 5 coisas concretas que ele faz"], "dica": "um uso prático ou '
+                  'atalho útil, 1 frase"}. Se não reconhecer um item, deduza pelo nome e descrição e diga que é provável.\n\n'
+                  + json.dumps(lista, ensure_ascii=False))
+        async with sem:
+            try:
+                got = json_in(await ask_ai(prompt))
+            except Exception as e:
+                job['erro'] = str(e)[:200]
+                got = {}
+        cache = read_json(CENTRAL_APPS_AI, {})
+        for k, v in (got.items() if isinstance(got, dict) else []):
+            if isinstance(v, dict):
+                cache[k] = v
+        CENTRAL_APPS_AI.write_text(json.dumps(cache, ensure_ascii=False))
+        job['feitos'] += len(batch)
+        await broadcast({'type': 'central', 'what': 'apps', 'job': job, 'ia': {k: cache[k] for k in got if k in cache}})
+
+    await asyncio.gather(*(one(b) for b in batches))
+    job['rodando'] = False
+    await broadcast({'type': 'central', 'what': 'apps', 'job': job})
+
+
+@app.post('/api/central/apps/explain')
+async def central_apps_explain(req: Request):
+    d = await req.json()
+    if (central_jobs.get('apps') or {}).get('rodando'):
+        return {'ok': False, 'erro': 'Já há uma explicação em andamento.'}
+    items = [i for i in d.get('items', []) if i.get('key')][:400]
+    if not d.get('refazer'):
+        done = read_json(CENTRAL_APPS_AI, {})
+        items = [i for i in items if i['key'] not in done]
+    if not items:
+        return {'ok': True, 'total': 0}
+    asyncio.create_task(explain_apps(items))
+    return {'ok': True, 'total': len(items)}
+
+
+@app.post('/api/central/launch')
+async def central_launch(req: Request):
+    app_id = str((await req.json()).get('id', ''))
+    if app_id not in {a['id'] for a in central.programs()}:
+        return JSONResponse({'error': 'programa desconhecido'}, status_code=400)
+    subprocess.Popen(['gtk-launch', app_id], env=claude_env(), start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {'ok': True}
+
+
+@app.post('/api/central/open')
+async def central_open(req: Request):
+    path = Path(str((await req.json()).get('path', ''))).expanduser().resolve()
+    if not path.exists() or not str(path).startswith(str(HOME)):
+        return JSONResponse({'error': 'caminho inválido'}, status_code=400)
+    target = path if path.is_dir() else path.parent
+    subprocess.Popen(['xdg-open', str(target)], env=claude_env(), start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {'ok': True}
+
+
+@app.get('/api/central/projects')
+async def central_projects(refresh: bool = False):
+    d = await cached_scan(CENTRAL_PROJECTS, central.projects, refresh, 3600)
+    return {'projetos': d['data'], 'quando': d['_at']}
+
+
+def all_flows():
+    custom = read_json(FLOWS, [])
+    scheduled = {i.get('flow'): i for i in load_agenda() if i.get('flow')}
+    out = []
+    for f in [*({**t, 'modelo': True} for t in central.FLOW_TEMPLATES), *custom]:
+        a = scheduled.get(f['id'])
+        out.append({**f, 'agendado': {'id': a['id'], 'when': a['when'], 'repeat': a.get('repeat')} if a else None})
+    return out
+
+
+def flow_prompt(f: dict) -> str:
+    alvo = ''
+    if f.get('pastas'):
+        alvo = '\nPastas/projetos envolvidos: ' + ', '.join(f['pastas'])
+    return f"[Fluxo de produtividade: {f['nome']}]\n{f['pedido']}{alvo}"
+
+
+@app.get('/api/central/flows')
+async def central_flows():
+    return all_flows()
+
+
+@app.post('/api/central/flows')
+async def central_flow_add(req: Request):
+    d = await req.json()
+    nome, pedido = str(d.get('nome', '')).strip(), str(d.get('pedido', '')).strip()
+    if not nome or not pedido:
+        return JSONResponse({'error': 'Nome e instrução são obrigatórios.'}, status_code=400)
+    flow = {'id': 'meu-' + uuid.uuid4().hex[:6], 'nome': nome[:80], 'icone': str(d.get('icone') or '⚡')[:4],
+            'descricao': str(d.get('descricao', ''))[:300], 'pedido': pedido[:3000],
+            'pastas': [str(p)[:300] for p in d.get('pastas', [])][:20], 'repetir': d.get('repetir') or None}
+    flows = read_json(FLOWS, [])
+    flows.append(flow)
+    FLOWS.write_text(json.dumps(flows, ensure_ascii=False, indent=1))
+    return flow
+
+
+@app.delete('/api/central/flows/{flow_id}')
+async def central_flow_del(flow_id: str):
+    FLOWS.write_text(json.dumps([f for f in read_json(FLOWS, []) if f['id'] != flow_id], ensure_ascii=False, indent=1))
+    items = [i for i in load_agenda() if i.get('flow') != flow_id]
+    save_agenda(items)
+    await broadcast({'type': 'agenda', 'items': items})
+    return {'ok': True}
+
+
+@app.post('/api/central/flows/{flow_id}/run')
+async def central_flow_run(flow_id: str, req: Request):
+    f = next((x for x in all_flows() if x['id'] == flow_id), None)
+    if not f:
+        return JSONResponse({'error': 'fluxo não encontrado'}, status_code=404)
+    if (await req.json()).get('modo') == 'segundo-plano':
+        asyncio.create_task(run_task(flow_prompt(f), origin=f"fluxo {f['nome']}"))
+    else:
+        await send_to_brain(flow_prompt(f))
+    return {'ok': True}
+
+
+@app.post('/api/central/flows/{flow_id}/schedule')
+async def central_flow_schedule(flow_id: str, req: Request):
+    d = await req.json()
+    f = next((x for x in all_flows() if x['id'] == flow_id), None)
+    if not f:
+        return JSONResponse({'error': 'fluxo não encontrado'}, status_code=404)
+    items = [i for i in load_agenda() if i.get('flow') != flow_id]
+    if d.get('repetir'):
+        hh, mm = (str(d.get('hora') or '08:00').split(':') + ['0'])[:2]
+        when = datetime.now().replace(hour=int(hh) % 24, minute=int(mm) % 60, second=0, microsecond=0)
+        if when.timestamp() < time.time():
+            when += timedelta(days=1)
+        while d['repetir'] == 'dias-uteis' and when.weekday() >= 5:
+            when += timedelta(days=1)
+        items.append({'id': uuid.uuid4().hex[:6], 'when': when.timestamp(), 'repeat': d['repetir'], 'kind': 'tarefa',
+                      'text': flow_prompt(f), 'flow': flow_id})
+    items.sort(key=lambda i: i['when'])
+    save_agenda(items)
+    await broadcast({'type': 'agenda', 'items': items})
+    return {'ok': True}
+
+
+@app.post('/api/central/flows/suggest')
+async def central_flows_suggest():
+    projs = (await cached_scan(CENTRAL_PROJECTS, central.projects, False, 3600))['data']
+    files = (await cached_scan(CENTRAL_FILES, central.scan_files, False, 6 * 3600))['data']
+    resumo = {
+        'projetos': [{'nome': p['nome'], 'onde': p['pai'], 'tipos': p['tipos'], 'alteracoes': p.get('alteracoes'),
+                      'nao_enviados': p.get('nao_enviados'), 'ultimo_commit': (p.get('ultimo_commit') or {}).get('msg')}
+                     for p in projs[:30]],
+        'pastas': {k: v['arquivos'] for k, v in files['pastas'].items()},
+        'tipos': {k: v['arquivos'] for k, v in files['tipos'].items()},
+        'fluxos_que_ja_existem': [f['nome'] for f in all_flows()],
+    }
+    prompt = ('Crie fluxos de produtividade avançados e personalizados para este usuário, que tem um assistente (MESTRE) '
+              'capaz de: ler/mover arquivos (com confirmação), usar git e docker, Gmail, Google Agenda e Drive, '
+              'navegador, notas no Obsidian, tarefas agendadas e resumos falados. Integre pastas, projetos e '
+              'ferramentas reais listados abaixo; não repita os fluxos que já existem. Responda SOMENTE com uma lista '
+              'JSON de 5 objetos: {"nome": curto, "icone": um emoji, "descricao": 1-2 frases do benefício, "pedido": '
+              'instrução completa e específica para o assistente executar (com caminhos reais e cuidado de pedir '
+              'confirmação antes de mover, apagar ou enviar), "pastas": [caminhos envolvidos], "repetir": '
+              '"diario"|"dias-uteis"|"semanal"|null}.\n\n' + json.dumps(resumo, ensure_ascii=False))
+    try:
+        got = json_in(await ask_ai(prompt))
+    except Exception as e:
+        return JSONResponse({'error': f'Falha ao sugerir: {e}'}, status_code=500)
+    return [g for g in (got if isinstance(got, list) else []) if isinstance(g, dict) and g.get('nome') and g.get('pedido')]
 
 
 # ================================================================ portal NCFN (online)
