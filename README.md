@@ -162,6 +162,7 @@ mestre-tarefa "pesquise X e salve um resumo"
 | **Imagem** | Cor do holograma (automática, ciano, verde, âmbar, vermelho, roxo, rosa ou branco) e chuva de números ligada ou desligada |
 | **Reconhecimento de voz** | Whisper local (padrão) ou **API da OpenAI** (`gpt-4o-transcribe`). A chave fica só em `state/secrets.json` (chmod 600). Se a OpenAI falhar, ele volta sozinho para o Whisper. |
 | **Cérebro** | Opus (mais capaz) ou Sonnet (mais rápido) |
+| **Memória (arquivos .md)** | Pasta onde o MESTRE guarda a memória em Markdown: escolher pelo seletor do sistema, digitar o caminho ou abrir a pasta |
 | **Vigilância do sistema** | Ativa ou desligada |
 | **Conexões e permissões** | Uma chave liga/desliga para cada capacidade (lista abaixo) |
 | **Sempre permitidos** | Ações que você liberou de vez, com botão para revogar |
@@ -265,7 +266,10 @@ Funciona com Brave, Chrome, Chromium, Firefox, Vivaldi e Edge. O navegador autom
 
 ## Memória no Obsidian
 
-Com `"memory_dir"` no `config.json` apontando para uma pasta do seu cofre do Obsidian, essa pasta vira a **memória de longo prazo** do MESTRE:
+Em **⚙ Configurações → Memória (arquivos .md)**, escolha uma pasta do computador. O botão **📁 Escolher pasta…** abre o seletor do sistema; também dá para digitar o caminho e clicar em Salvar. **Abrir pasta** mostra os arquivos. Pode ser uma pasta do seu cofre do Obsidian ou qualquer outra, e ela fica gravada em `memory_dir` no `config.json`.
+
+- **Pasta nova:** é criada com as notas iniciais (índice, sobre você e diário). Se já tiver notas, nada é sobrescrito.
+- **Função:** a pasta vira a **memória de longo prazo** do MESTRE:
 
 - **O que ele guarda sozinho, sem pedir licença:** preferências, fatos sobre você e seus projetos, decisões, pendências e resultados de pesquisas.
   - Cada assunto vira uma nota Markdown com frontmatter (`tags`, `criado`, `atualizado`) e links `[[…]]`.

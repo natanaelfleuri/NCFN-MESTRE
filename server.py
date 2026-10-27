@@ -255,6 +255,70 @@ def memory_prompt() -> str:
     return ''.join(parts)
 
 
+MEMORY_SEED = {
+    '00 - ÍNDICE.md': '''---
+tags: [assistente, memoria, indice]
+criado: {hoje}
+atualizado: {hoje}
+---
+# Memória do assistente MESTRE
+
+Memória de longo prazo do **MESTRE**: ele guarda aqui, sem perguntar, o que for importante lembrar
+entre as conversas. Você pode ler, corrigir ou apagar qualquer nota.
+
+## Notas
+
+- [[SOBRE O USUÁRIO]]: quem é o usuário, preferências e jeito de trabalhar
+- [[CONVERSAS]]: diário das conversas relevantes
+
+## Convenções
+
+- **Notas:** uma por assunto, com o tipo no título: `PROJETO - …`, `PESSOA - …`, `DECISÃO - …`, `PESQUISA - …`.
+- **Frontmatter:** `tags`, `criado` e `atualizado`, com datas no formato AAAA-MM-DD.
+- **Ligações:** links `[[…]]` entre notas relacionadas.
+- **Segredos:** nunca senhas, tokens ou chaves.
+''',
+    'SOBRE O USUÁRIO.md': '''---
+tags: [assistente, memoria, usuario]
+criado: {hoje}
+atualizado: {hoje}
+---
+# Sobre o usuário
+
+## Perfil
+
+## Preferências
+''',
+    'CONVERSAS.md': '''---
+tags: [assistente, memoria, diario]
+criado: {hoje}
+atualizado: {hoje}
+---
+# Conversas com o MESTRE
+
+Registro das conversas relevantes, da mais antiga para a mais recente.
+''',
+}
+
+
+def seed_memory(path: Path):
+    """Cria a pasta de memória e as notas iniciais que estiverem faltando (nunca sobrescreve)."""
+    path.mkdir(parents=True, exist_ok=True)
+    hoje = datetime.now().strftime('%Y-%m-%d')
+    for name, body in MEMORY_SEED.items():
+        f = path / name
+        if not f.exists() or f.stat().st_size == 0:
+            f.write_text(body.replace('{hoje}', hoje))
+
+
+def memory_info():
+    raw = CONFIG.get('memory_dir') or ''
+    d = Path(raw).expanduser() if raw else None
+    ok = bool(d and d.is_dir())
+    return {'memory_dir': raw, 'memory_ok': ok,
+            'memory_notes': len(list(d.rglob('*.md'))) if ok else 0}
+
+
 def claude_settings_file():
     settings = {'hooks': {'PreToolUse': [{'matcher': '*', 'hooks': [
         {'type': 'command', 'command': f'{ROOT}/.venv/bin/python {ROOT}/hooks/guard.py'}]}]}}
@@ -978,6 +1042,7 @@ def public_settings():
             'openai_key_set': bool(secrets().get('openai_api_key')), 'always': always_rules(),
             'theme': CONFIG.get('theme', 'auto'), 'rain': CONFIG.get('rain', True),
             'ticker': CONFIG.get('ticker', True) and permissions.current().get('news', True),
+            **memory_info(),
             'newsflash': news.db_path() is not None,
             'permissions': permissions.public()}
 
@@ -1036,6 +1101,20 @@ async def set_settings(req: Request):
         save_config()
         if permissions.disallowed_tools(permissions.current()) != before:
             restart = True  # ferramentas inteiras entram ou saem do cérebro
+    if isinstance(data.get('memory_dir'), str):
+        raw = data['memory_dir'].strip()
+        if raw:
+            target = Path(raw).expanduser()
+            if not target.is_absolute():
+                return JSONResponse({**public_settings(), 'error': 'Use um caminho completo (ex.: /home/... ou ~/...).'}, status_code=400)
+            try:
+                seed_memory(target)
+            except OSError as e:
+                return JSONResponse({**public_settings(), 'error': f'Não consegui usar essa pasta: {e}'}, status_code=400)
+            raw = str(target)
+        if raw != CONFIG.get('memory_dir', ''):
+            CONFIG['memory_dir'] = raw
+            restart = True  # o cérebro relê a memória do novo local
     if isinstance(data.get('remove_always'), str):
         ALWAYS.write_text(json.dumps([r for r in always_rules() if r['match'] != data['remove_always']],
                                      ensure_ascii=False, indent=1))
@@ -1168,6 +1247,26 @@ async def reader_set(req: Request):
         cfg['voice'] = d['voice']
     save_config()
     return reader_settings()
+
+
+@app.post('/api/memory/pick')
+async def memory_pick():
+    """Abre o seletor de pastas do sistema e devolve a escolhida (sem salvar)."""
+    start = CONFIG.get('memory_dir') or str(HOME / 'Documentos')
+    proc = await asyncio.create_subprocess_exec(
+        'zenity', '--file-selection', '--directory', '--title=Pasta da memória do MESTRE (arquivos .md)',
+        f'--filename={Path(start).expanduser()}/', env=claude_env(),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _ = await proc.communicate()
+    return {'path': out.decode().strip()}
+
+
+@app.post('/api/memory/open')
+async def memory_open():
+    d = Path(CONFIG.get('memory_dir') or '').expanduser()
+    if d.is_dir():
+        subprocess.Popen(['xdg-open', str(d)], env=claude_env())
+    return {'ok': d.is_dir()}
 
 
 @app.get('/api/agenda')

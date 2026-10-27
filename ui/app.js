@@ -529,6 +529,13 @@ function applySettings(s) {
   $('#pitch').value = settings.pitch ?? 1;
   $('#pitch-v').textContent = Number(settings.pitch ?? 1).toFixed(2);
   renderPerms();
+  if (document.activeElement !== $('#mem-dir')) $('#mem-dir').value = settings.memory_dir || '';
+  const vaultOn = (settings.permissions || []).find((p) => p.key === 'vault')?.on !== false;
+  $('#mem-state').textContent = !settings.memory_dir
+    ? 'Nenhuma pasta escolhida: o MESTRE não guarda memória em arquivos.'
+    : settings.memory_ok
+      ? `✔ ${settings.memory_notes} notas .md nesta pasta${vaultOn ? '' : ' · a permissão "Memória no Obsidian" está desligada'}. Ele cria o índice, a nota sobre você e o diário se faltarem.`
+      : '⚠ Pasta não encontrada.';
   const showTicker = settings.ticker !== false && settings.newsflash;
   $('#ticker').classList.toggle('hidden', !showTicker);
   if (showTicker && !tickerLoaded) loadTicker();
@@ -615,6 +622,21 @@ $('#voice').onchange = (e) => postSettings({ voice: e.target.value });
 $('#pitch').oninput = (e) => ($('#pitch-v').textContent = Number(e.target.value).toFixed(2));
 $('#pitch').onchange = (e) => postSettings({ pitch: Number(e.target.value) });
 $('#test-voice').onclick = () => send({ type: 'test_voice' });
+$('#mem-pick').onclick = async () => {
+  $('#mem-state').textContent = 'Escolha a pasta na janela que abriu…';
+  const { path } = await (await fetch('/api/memory/pick', { method: 'POST' })).json();
+  if (path) { $('#mem-dir').value = path; saveMemoryDir(); } else applySettings(settings);
+};
+async function saveMemoryDir() {
+  const r = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ memory_dir: $('#mem-dir').value }) });
+  const d = await r.json();
+  applySettings(d);
+  if (d.error) $('#mem-state').textContent = `✖ ${d.error}`;
+  else addLog('ok', `Memória: ${d.memory_dir || 'desativada'}`);
+}
+$('#mem-save').onclick = saveMemoryDir;
+$('#mem-dir').onkeydown = (e) => { if (e.key === 'Enter') saveMemoryDir(); };
+$('#mem-open').onclick = () => fetch('/api/memory/open', { method: 'POST' });
 $('#save-key').onclick = () => { postSettings({ openai_api_key: $('#openai-key').value }); $('#openai-key').value = ''; };
 
 function renderAgenda(items) {
