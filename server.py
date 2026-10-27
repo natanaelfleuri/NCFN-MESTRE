@@ -184,6 +184,14 @@ def voice_pitch(pcm16: bytes) -> float | None:
     return float(np.median(f0)) if len(f0) >= 15 else None
 
 
+SENHOR = re.compile(r'\b(?:[Oo]s |[Aa]s |[Oo] |[Aa] )?(senhor(?:a|es|as)?|Senhor(?:a|es|as)?)\b')
+
+
+def fix_address(text: str) -> str:
+    """Rede de segurança: o hábito antigo de dizer "senhor" vira o tratamento atual."""
+    return SENHOR.sub(lambda m: address_word(), text)
+
+
 def load_address() -> str:
     try:
         voice = json.loads(ADDRESS_FILE.read_text())['voz']
@@ -323,6 +331,11 @@ def persona_prompt():
     if CONFIG.get('gender') == 'feminino':
         base += ('\n\n## Gênero\nNesta configuração sua voz e seu rosto são femininos: fale de si no '
                  'feminino ("estou pronta", "fiquei curiosa"). Seu nome continua MESTRE.\n')
+    # Por último, para valer sobre a memória e sobre o hábito das conversas antigas.
+    base += (f'\n\n## Tratamento (prevalece sobre memória e conversas anteriores)\n'
+             f'Chame o usuário pela palavra da etiqueta `[tratamento: X]` da mensagem: hoje "{address_word("m")}" '
+             f'para voz masculina e "{address_word("f")}" para voz feminina. Nunca diga "senhor" nem "senhora", '
+             'mesmo que tenha dito antes nesta conversa.\n')
     return base
 
 
@@ -627,7 +640,7 @@ class Mouth:
             emotion = self.emotion
             if len(tags) > 1:
                 self.emotion = tags[-1]
-            spoken = speakable(strip_tags(text))
+            spoken = speakable(fix_address(strip_tags(text)))
             if not spoken:
                 continue
             try:
@@ -660,11 +673,14 @@ async def on_brain(kind, payload):
         mouth.feed(payload)
         text = _ui_hold + payload
         cut = text.rfind('[')
+        word = re.search(r'\w+$', text)  # palavra pela metade: espera o resto (troca de "senhor")
         if cut != -1 and ']' not in text[cut:] and len(text) - cut < 16:
             text, _ui_hold = text[:cut], text[cut:]
+        elif word and len(text) - word.start() < 12:
+            text, _ui_hold = text[:word.start()], text[word.start():]
         else:
             _ui_hold = ''
-        text = strip_tags(text)
+        text = fix_address(strip_tags(text))
         if text:
             await broadcast({'type': 'delta', 'text': text})
         first = EMO_TAG.match(payload)
@@ -675,7 +691,7 @@ async def on_brain(kind, payload):
     elif kind == 'flush':
         mouth.flush()
         if _ui_hold:
-            await broadcast({'type': 'delta', 'text': strip_tags(_ui_hold)})
+            await broadcast({'type': 'delta', 'text': fix_address(strip_tags(_ui_hold))})
             _ui_hold = ''
     elif kind == 'tool':
         await broadcast({'type': 'tool', 'name': payload['name'], 'detail': describe_tool(payload)})
@@ -743,7 +759,7 @@ async def send_to_brain(text: str, echo=True):
     if brain.busy:
         await brain.interrupt()
         await asyncio.sleep(0.3)
-    await brain.ask(f'[tratamento: {address_word()}] {text}')
+    await brain.ask(f'[tratamento: {address_word()} (nunca "senhor")] {text}')
 
 
 async def handle_utterance(text: str, source: str):
@@ -1402,11 +1418,11 @@ async def on_portal_brain(kind, payload):
             _portal_hold = ''
         text = strip_tags(text)
         if text:
-            await portal_broadcast({'type': 'delta', 'text': text})
+            await portal_broadcast({'type': 'delta', 'text': fix_address(text)})
     elif kind == 'flush':
         portal_mouth.flush()
         if _portal_hold:
-            await portal_broadcast({'type': 'delta', 'text': strip_tags(_portal_hold)})
+            await portal_broadcast({'type': 'delta', 'text': fix_address(strip_tags(_portal_hold))})
             _portal_hold = ''
     elif kind == 'tool':
         await portal_broadcast({'type': 'tool', 'detail': describe_tool(payload).replace('ncfn-tela ', '')})
