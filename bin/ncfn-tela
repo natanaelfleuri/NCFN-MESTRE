@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""ncfn-tela: age na página do portal NCFN aberta na janela do MESTRE.
+
+O comando vai ao servidor do MESTRE, que o repassa para a janela suspensa no
+navegador do usuário; lá ele é executado com a sessão do próprio usuário.
+Ações que mudam dados (api POST/PUT/PATCH/DELETE, botões como Excluir ou
+Revogar) pedem confirmação na janela antes de acontecer.
+
+  ncfn-tela ler [tudo]                 texto, links, botões e campos da página
+  ncfn-tela navegar /rota              abre uma página do portal
+  ncfn-tela voltar | recarregar
+  ncfn-tela clicar "texto" [n]         clica no botão/link com esse texto (n-ésimo, se houver vários)
+  ncfn-tela preencher "campo" "valor"  preenche campo (rótulo, placeholder ou nome)
+  ncfn-tela enviar ["campo"]           envia o formulário (Enter no campo)
+  ncfn-tela rolar baixo|cima|topo|fim
+  ncfn-tela api GET|POST|PUT|PATCH|DELETE /api/rota ['{"json": 1}']
+"""
+import json
+import os
+import sys
+import urllib.request
+
+COMMANDS = {'ler', 'navegar', 'voltar', 'recarregar', 'clicar', 'preencher', 'enviar', 'rolar', 'api'}
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ('-h', '--help', 'ajuda') or args[0] not in COMMANDS:
+        print(__doc__.strip())
+        return 0 if args and args[0] in ('-h', '--help', 'ajuda') else 2
+    url = os.environ.get('MESTRE_URL', 'http://127.0.0.1:7777') + '/api/portal/cmd'
+    body = json.dumps({'cmd': args[0], 'args': args[1:]}).encode()
+    req = urllib.request.Request(url, body, {'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=170) as r:
+            out = json.loads(r.read())
+    except Exception as e:
+        print(f'erro: servidor do MESTRE indisponível ({e})')
+        return 1
+    if not out.get('ok'):
+        print('erro:', out.get('erro'))
+        return 1
+    res = out.get('resultado')
+    print(res if isinstance(res, str) else json.dumps(res, ensure_ascii=False, indent=1))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

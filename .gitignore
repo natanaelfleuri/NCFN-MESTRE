@@ -10,4 +10,4 @@ state/
 
 # configuração e contexto pessoais (partem de config.example.json / persona.md)
 config.json
-persona.local.md
+persona*.local.md

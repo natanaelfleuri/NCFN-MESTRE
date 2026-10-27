@@ -145,13 +145,38 @@ def fingerprint(tool, ti):
     return hashlib.sha256(json.dumps([tool, ti], sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
 
 
+PORTAL_CMD = re.compile(r'^\s*ncfn-tela(\s|$)')
+
+
+def portal_only(tool, ti):
+    """Cérebro do portal: só o ncfn-tela, sem encadear outros comandos."""
+    cmd = str(ti.get('command', '')) if tool == 'Bash' else ''
+    if not PORTAL_CMD.match(cmd):
+        decide('deny', 'No portal NCFN você só age pela página, com o comando ncfn-tela.')
+    if re.search(r'[`\n\r]|\$[({A-Za-z_]', cmd):
+        decide('deny', 'Comando recusado: sem $, crases ou várias linhas. Use só ncfn-tela com argumentos entre aspas.')
+    import shlex
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        decide('deny', 'Aspas desbalanceadas no comando.')
+    if any(t and set(t) <= set(';&|<>()') for t in tokens):
+        decide('deny', 'Comando recusado: nada de ;, &&, |, > ou subcomandos. Um ncfn-tela por vez.')
+    decide('allow')
+
+
 def main():
+    portal = os.environ.get('MESTRE_PROFILE') == 'portal'
     try:
         data = json.load(sys.stdin)
     except Exception:
-        decide('allow')
+        decide('deny' if portal else 'allow')
     tool = data.get('tool_name', '')
     ti = data.get('tool_input') or {}
+    if portal:
+        portal_only(tool, ti)
     # Permissões desligadas em Configurações: recusa sem oferecer confirmação.
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     try:

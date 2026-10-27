@@ -23,6 +23,7 @@ Um **guardião** fica entre o cérebro e o computador e pede confirmação antes
 - [Configurações](#configurações)
 - [Segurança](#segurança)
 - [Autonomia: agenda, tarefas e vigilância](#autonomia-agenda-tarefas-e-vigilância)
+- [Uso online: janela suspensa num portal web](#uso-online-janela-suspensa-num-portal-web)
 - [Estrutura do projeto](#estrutura-do-projeto)
 - [Personalização](#personalização)
 - [Solução de problemas](#solução-de-problemas)
@@ -303,6 +304,88 @@ Se o leitor de RSS [NewsFlash](https://flathub.org/apps/io.gitlab.news_flash.New
 
 ---
 
+## Uso online: janela suspensa num portal web
+
+O MESTRE pode atender dentro de um portal web seu (no caso do autor, o portal
+NCFN), de qualquer lugar: um botão no menu do portal (ou o orbe no canto, ou
+**Alt+M**) abre uma janela suspensa, arrastável e redimensionável, onde você
+escreve ou fala os comandos. Ali ele lê as páginas, navega, clica, preenche
+formulários e consulta a API do portal — sempre no seu navegador, com a sua
+sessão e as suas permissões.
+
+Como funciona:
+
+```
+navegador (portal)  ──wss /mestre-link/portal/ws──▶  Cloudflare Access ─▶ túnel ─▶ Caddy
+                                                                                  │
+         ◀── comandos ncfn-tela (ler, navegar, clicar…) ──  MESTRE (gateway da rede Docker)
+                                                              └─ cérebro "portal" (só ncfn-tela)
+```
+
+- **Ouvinte separado.** Além de `127.0.0.1`, o servidor escuta só no gateway
+  da rede Docker do portal (`portal.docker_network`), nunca em `0.0.0.0`.
+  Nesse ouvinte só existe `/portal/*`; a interface local, as APIs e o `/ws`
+  ficam inacessíveis por ele.
+- **Autenticação.** A conexão precisa do token do Cloudflare Access
+  (`Cf-Access-Jwt-Assertion`): assinatura RS256 conferida nas chaves do time,
+  AUD da aplicação, emissor e e-mail na lista `allowed_emails`, além da origem
+  do portal. Sem configuração completa, recusa tudo.
+- **Cérebro próprio.** Um segundo processo `claude -p` com sessão própria
+  (`state/session-portal.json`), persona `persona_portal.md` (+
+  `persona_portal.local.md` com o mapa das rotas, fora do git), só a
+  ferramenta Bash, sem conectores MCP. O guardião, no perfil `portal`, só
+  aceita `ncfn-tela …` sem `;`, `&&`, `|`, `>`, `$` ou crases: ele não toca
+  no seu computador.
+- **`bin/ncfn-tela`** manda o comando ao servidor (`POST /api/portal/cmd`, só
+  local), que o repassa à janela aberta e devolve o resultado:
+  `ler [tudo]`, `navegar /rota`, `voltar`, `recarregar`, `clicar "texto" [n]`,
+  `preencher "campo" "valor"`, `enviar ["campo"]`, `rolar baixo|cima|topo|fim`,
+  `api MÉTODO /api/rota ['json']`.
+- **Confirmação na janela.** `api` com POST/PUT/PATCH/DELETE e cliques em
+  botões como Excluir, Apagar, Revogar, Destruir ou Bloquear abrem a caixa
+  *Só dessa vez / Confirmar sempre / Negar* antes de acontecer.
+- **Voz.** O botão 🎙 grava e manda o áudio para o Whisper do PC; o 🔊 liga as
+  respostas faladas (Kokoro), tocadas pela Web Audio API.
+- **Sempre disponível.** Com o portal ligado, o ✕ da janela do PC só fecha a
+  janela (`mestre fechar`); o servidor continua atendendo o portal. `mestre
+  stop` desliga tudo.
+
+Configuração (`config.json`, bloco `portal`):
+
+```json
+"portal": {
+  "enabled": true,
+  "docker_network": "nome_da_rede_do_portal",
+  "bind": "auto",
+  "cf_team_domain": "https://SEU-TIME.cloudflareaccess.com",
+  "cf_aud": ["AUD-DA-APLICACAO"],
+  "allowed_emails": ["voce@exemplo.com"],
+  "origins": ["https://portal.exemplo.com"],
+  "keep_alive": true
+}
+```
+
+No proxy do portal (Caddy), a rota que leva ao MESTRE:
+
+```
+handle_path /mestre-link/* {
+    @sem_access not header Cf-Access-Jwt-Assertion *
+    respond @sem_access 403
+    reverse_proxy IP_DO_GATEWAY:7777
+}
+```
+
+O componente da janela (React/Next.js) fica no repositório do portal; ele
+conecta em `/mestre-link/portal/ws` (ou direto em `ws://127.0.0.1:7777/portal/ws`
+quando o portal é aberto em localhost) e implementa os comandos acima no
+navegador. O cabeçalho `Permissions-Policy` do portal precisa permitir
+`microphone=(self)` para o 🎙 funcionar.
+
+Proteções gerais: o servidor local recusa `POST` e WebSocket vindos de outras
+origens (um site aberto no navegador não consegue mandar ordens ao MESTRE).
+
+---
+
 ## Estrutura do projeto
 
 ```
@@ -315,6 +398,9 @@ bin/mestre-pc        tela, mouse, teclado, janelas, câmera, área de transferê
 bin/mestre-agenda    lembretes e tarefas agendadas
 bin/mestre-tarefa    tarefas em segundo plano
 bin/mestre-noticias  notícias dos feeds do NewsFlash
+bin/ncfn-tela        ações na página do portal aberta na janela suspensa
+portal.py            ponte online: ouvinte na rede Docker, token do Cloudflare Access, repasse
+persona_portal.md    persona do cérebro que atende dentro do portal
 news.py              leitura do NewsFlash e dos feeds RSS/Atom
 reader.py            biblioteca: extração de PDF/EPUB/DOCX/TXT e trechos para leitura
 ui/                  interface: index.html, style.css, app.js, symbol.js (símbolo NCFN)
@@ -339,7 +425,8 @@ APIs HTTP:
 - `GET /api/news` (manchetes do NewsFlash);
 - `GET /api/library`, `POST /api/library/upload` (corpo = arquivo, cabeçalho `X-Filename`), `DELETE /api/library/{id}`, `POST /api/library/{id}/ask`;
 - `GET/POST /api/reader/settings`;
-- `POST /api/window/{minimize|maximize|close}`.
+- `POST /api/window/{minimize|maximize|close}`;
+- `POST /api/portal/cmd` (só local, usado pelo `ncfn-tela`) e `WS /portal/ws` (janela do portal: `page`, `text`, áudio, `voice`, `cmd_result`, `stop`, `reset` ↔ `hello`, `status`, `user`, `delta`, `tool`, `say`, `cmd`, `done`).
 
 ---
 

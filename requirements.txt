@@ -14,3 +14,4 @@ python-xlib
 pillow
 opencv-python-headless
 pypdf
+PyJWT[crypto]

@@ -27,6 +27,7 @@ from pathlib import Path
 import news
 import numpy as np
 import permissions
+import portal
 import reader
 import psutil
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -350,8 +351,10 @@ def claude_flags():
 class Brain:
     """Um processo `claude -p` contínuo (stream-json) que guarda a conversa."""
 
-    def __init__(self, emit):
+    def __init__(self, emit, profile='desktop'):
         self.emit = emit
+        self.profile = profile
+        self.session_file = SESSION_FILE if profile == 'desktop' else STATE / f'session-{profile}.json'
         self.proc = None
         self.busy = False
         self.session = None
@@ -361,19 +364,26 @@ class Brain:
         # Sem a permissão "Memória da conversa", cada abertura começa do zero.
         if permissions.current().get('memory', True):
             try:
-                self.session = json.loads(SESSION_FILE.read_text()).get('session_id')
+                self.session = json.loads(self.session_file.read_text()).get('session_id')
             except (OSError, ValueError):
                 pass
 
     async def start(self):
+        portal_side = self.profile == 'portal'
         cmd = ['claude', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
-               '--verbose', '--include-partial-messages', *claude_flags(),
-               '--settings', str(claude_settings_file()), '--append-system-prompt', persona_prompt(),
+               '--verbose', '--include-partial-messages', *(portal_flags() if portal_side else claude_flags()),
+               '--settings', str(claude_settings_file()),
+               '--append-system-prompt', portal_prompt() if portal_side else persona_prompt(),
                '--model', CONFIG['model']]
         if self.session:
             cmd += ['--resume', self.session]
+        cwd, env = HOME, claude_env()
+        if portal_side:
+            cwd = STATE / 'portal'
+            cwd.mkdir(exist_ok=True)
+            env['MESTRE_PROFILE'] = 'portal'
         self.proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=str(HOME), env=claude_env(), stdin=asyncio.subprocess.PIPE,
+            *cmd, cwd=str(cwd), env=env, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=16 * 1024 * 1024)
         asyncio.create_task(self._read(self.proc))
         asyncio.create_task(self._stderr(self.proc))
@@ -401,7 +411,7 @@ class Brain:
     async def restart(self, keep_session=True):
         if not keep_session:
             self.session = None
-            SESSION_FILE.unlink(missing_ok=True)
+            self.session_file.unlink(missing_ok=True)
         old = self.proc
         self.proc = None
         if old and old.returncode is None:
@@ -421,7 +431,7 @@ class Brain:
             t = d.get('type')
             if d.get('session_id') and d.get('session_id') != self.session:
                 self.session = d['session_id']
-                SESSION_FILE.write_text(json.dumps({'session_id': self.session}))
+                self.session_file.write_text(json.dumps({'session_id': self.session}))
             if t == 'stream_event':
                 ev = d.get('event', {})
                 et = ev.get('type')
@@ -477,7 +487,8 @@ class Mouth:
 
     SENTENCE = re.compile(r'(.+?[.!?…:;](?=\s|$)|.+?\n)', re.S)
 
-    def __init__(self):
+    def __init__(self, send=None):
+        self.send = send or broadcast
         self.buffer = ''
         self.queue: asyncio.Queue = asyncio.Queue()
         self.generation = 0
@@ -536,7 +547,7 @@ class Mouth:
                 continue
             if gen != self.generation:
                 continue
-            await broadcast({'type': 'say', 'text': spoken, 'emotion': emotion,
+            await self.send({'type': 'say', 'text': spoken, 'emotion': emotion,
                              'audio': base64.b64encode(audio).decode()})
 
 
@@ -972,6 +983,183 @@ async def handle_reader(data):
         reading.stop()
 
 
+# ================================================================ portal NCFN (online)
+PORTAL = portal.settings(CONFIG)
+relay = portal.Relay()
+portal_brain: Brain | None = None
+portal_mouth: Mouth | None = None
+_portal_hold = ''
+
+
+def portal_prompt():
+    parts = [(ROOT / 'persona_portal.md').read_text()]
+    local = ROOT / 'persona_portal.local.md'
+    if local.exists():
+        parts.append(local.read_text())
+    return '\n\n'.join(parts)
+
+
+def portal_flags():
+    # Dentro do portal o cérebro só enxerga o navegador do usuário, pelo ncfn-tela.
+    return ['--permission-mode', 'bypassPermissions', '--tools', 'Bash', '--strict-mcp-config',
+            '--disallowedTools', 'AskUserQuestion,EnterPlanMode,ExitPlanMode']
+
+
+async def portal_broadcast(msg: dict):
+    for ws in list(relay.clients):
+        if msg.get('type') == 'say' and not relay.clients.get(ws, {}).get('voice'):
+            continue
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            relay.clients.pop(ws, None)
+
+
+def portal_voice_on():
+    return any(c.get('voice') for c in relay.clients.values())
+
+
+async def on_portal_brain(kind, payload):
+    global _portal_hold
+    if kind == 'delta':
+        if portal_voice_on():
+            portal_mouth.feed(payload)
+        text = _portal_hold + payload
+        cut = text.rfind('[')
+        if cut != -1 and ']' not in text[cut:] and len(text) - cut < 16:
+            text, _portal_hold = text[:cut], text[cut:]
+        else:
+            _portal_hold = ''
+        text = strip_tags(text)
+        if text:
+            await portal_broadcast({'type': 'delta', 'text': text})
+    elif kind == 'flush':
+        portal_mouth.flush()
+        if _portal_hold:
+            await portal_broadcast({'type': 'delta', 'text': strip_tags(_portal_hold)})
+            _portal_hold = ''
+    elif kind == 'tool':
+        await portal_broadcast({'type': 'tool', 'detail': describe_tool(payload).replace('ncfn-tela ', '')})
+    elif kind == 'done':
+        portal_mouth.flush()
+        await portal_broadcast({'type': 'done', 'error': bool(payload and payload.get('error'))})
+
+
+async def portal_ask(ws, text: str):
+    global portal_brain
+    text = text.strip()
+    if not text:
+        return
+    if portal_brain is None:
+        portal_brain = Brain(on_portal_brain, profile='portal')
+        await portal_brain.start()
+    portal_mouth.stop()
+    page = relay.clients.get(ws, {}).get('page') or {}
+    await portal_broadcast({'type': 'user', 'text': text})
+    await portal_broadcast({'type': 'status', 'state': 'thinking'})
+    if portal_brain.busy:
+        await portal_brain.interrupt()
+        await asyncio.sleep(0.3)
+    where = f"[página aberta: {page.get('path', '?')} — {page.get('title', '')}]\n" if page else ''
+    await portal_brain.ask(where + text)
+
+
+def local_origin(origin: str | None) -> bool:
+    port = CONFIG['port']
+    return origin in (None, f'http://127.0.0.1:{port}', f'http://localhost:{port}')
+
+
+@app.middleware('http')
+async def same_origin_only(request, call_next):
+    # Um site qualquer aberto no navegador não pode mandar ordens ao MESTRE local.
+    if request.method not in ('GET', 'HEAD', 'OPTIONS') and not local_origin(request.headers.get('origin')):
+        return JSONResponse({'error': 'origem não autorizada'}, status_code=403)
+    return await call_next(request)
+
+
+@app.post('/api/portal/cmd')
+async def portal_cmd(req: Request):
+    """Usado pelo `ncfn-tela`: executa um comando na janela do portal aberta."""
+    if req.client and req.client.host != '127.0.0.1':
+        return JSONResponse({'ok': False, 'erro': 'só local'}, status_code=403)
+    data = await req.json()
+    return await relay.run(str(data.get('cmd', '')), [str(a) for a in data.get('args', [])])
+
+
+@app.get('/portal/health')
+async def portal_health():
+    return {'ok': True}
+
+
+@app.websocket('/portal/ws')
+async def portal_ws(ws: WebSocket):
+    global portal_mouth
+    origin = (ws.headers.get('origin') or '').rstrip('/')
+    if ws.scope.get('mestre_remote'):
+        # Pela internet: só com o token do Cloudflare Access e da origem do portal.
+        email = portal.verify_access(ws.headers.get('cf-access-jwt-assertion', ''), PORTAL)
+        if not PORTAL['enabled'] or not email or origin not in PORTAL['origins']:
+            await ws.close(code=1008)
+            return
+    else:
+        email = 'local'
+        if origin and origin not in PORTAL['origins'] and not local_origin(origin):
+            await ws.close(code=1008)
+            return
+    await ws.accept()
+    if portal_mouth is None:
+        portal_mouth = Mouth(send=portal_broadcast)
+    relay.clients[ws] = {'email': email, 'page': None, 'active': time.time(), 'voice': False}
+    loop = asyncio.get_running_loop()
+    await ws.send_json({'type': 'hello', 'busy': bool(portal_brain and portal_brain.busy)})
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get('type') == 'websocket.disconnect':
+                break
+            if msg.get('bytes') is not None:
+                relay.touch(ws)
+                await ws.send_json({'type': 'status', 'state': 'transcribing'})
+                try:
+                    text = await loop.run_in_executor(STT_POOL, transcribe, msg['bytes'])
+                except Exception as e:
+                    print('[stt portal]', e, flush=True)
+                    text = ''
+                if text:
+                    await portal_ask(ws, text)
+                else:
+                    await ws.send_json({'type': 'status', 'state': 'idle'})
+                continue
+            if not msg.get('text'):
+                continue
+            data = json.loads(msg['text'])
+            kind = data.get('type')
+            if kind == 'page':
+                relay.touch(ws, page={'path': str(data.get('path', ''))[:300], 'title': str(data.get('title', ''))[:200]})
+            elif kind == 'voice':
+                relay.touch(ws, voice=bool(data.get('on')))
+                if not portal_voice_on():
+                    portal_mouth.stop()
+            elif kind == 'text':
+                relay.touch(ws)
+                await portal_ask(ws, str(data.get('text', ''))[:4000])
+            elif kind == 'cmd_result':
+                relay.answer(data)
+            elif kind == 'stop':
+                portal_mouth.stop()
+                if portal_brain:
+                    await portal_brain.interrupt()
+            elif kind == 'reset':
+                portal_mouth.stop()
+                if portal_brain:
+                    await portal_brain.restart(keep_session=False)
+                await portal_broadcast({'type': 'reset'})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        relay.clients.pop(ws, None)
+
+
 # ================================================================ HTTP
 @app.on_event('startup')
 async def startup():
@@ -988,6 +1176,8 @@ async def startup():
     asyncio.create_task(agenda_loop())
     asyncio.create_task(watch_loop())
     asyncio.create_task(split_loop())
+    if PORTAL['enabled']:
+        asyncio.create_task(portal.serve_bridge(app, PORTAL, CONFIG['port']))
 
 
 @app.get('/')
@@ -1316,12 +1506,17 @@ async def window(action: str):
     elif action == 'maximize':
         subprocess.Popen([pc, 'fullscreen', 'MESTRE', '--toggle'], env=env)
     elif action == 'close':
-        subprocess.Popen([str(HOME / '.local' / 'bin' / 'mestre'), 'stop'], start_new_session=True)
+        # Com o portal ligado, o ✕ só fecha a janela: o assistente segue disponível online.
+        how = 'fechar' if PORTAL['enabled'] and PORTAL['keep_alive'] else 'stop'
+        subprocess.Popen([str(HOME / '.local' / 'bin' / 'mestre'), how], start_new_session=True)
     return {'ok': True}
 
 
 @app.websocket('/ws')
 async def ws_endpoint(ws: WebSocket):
+    if not local_origin(ws.headers.get('origin')):
+        await ws.close(code=1008)
+        return
     await ws.accept()
     clients.add(ws)
     loop = asyncio.get_running_loop()

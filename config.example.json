@@ -36,5 +36,21 @@
     "COFRE"
   ],
   "ticker": true,
-  "memory_dir": "~/Documentos/Obsidian/MEMÓRIA DO ASSISTENTE"
+  "memory_dir": "~/Documentos/Obsidian/MEMÓRIA DO ASSISTENTE",
+  "portal": {
+    "enabled": false,
+    "docker_network": "",
+    "bind": "auto",
+    "cf_team_domain": "https://SEU-TIME.cloudflareaccess.com",
+    "cf_aud": [
+      "AUD-DA-APLICACAO-NO-ACCESS"
+    ],
+    "allowed_emails": [
+      "voce@exemplo.com"
+    ],
+    "origins": [
+      "https://portal.exemplo.com"
+    ],
+    "keep_alive": true
+  }
 }
