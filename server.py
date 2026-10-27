@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import news
 import numpy as np
 import permissions
 import psutil
@@ -812,6 +813,8 @@ def public_settings():
             'model': CONFIG['model'], 'watch': CONFIG.get('watch', True),
             'openai_key_set': bool(secrets().get('openai_api_key')), 'always': always_rules(),
             'theme': CONFIG.get('theme', 'auto'), 'rain': CONFIG.get('rain', True),
+            'ticker': CONFIG.get('ticker', True) and permissions.current().get('news', True),
+            'newsflash': news.db_path() is not None,
             'permissions': permissions.public()}
 
 
@@ -843,6 +846,8 @@ async def set_settings(req: Request):
         CONFIG['theme'] = data['theme']
     if isinstance(data.get('rain'), bool):
         CONFIG['rain'] = data['rain']
+    if isinstance(data.get('ticker'), bool):
+        CONFIG['ticker'] = data['ticker']
     g = CONFIG.get('gender', 'masculino')
     if data.get('voice') in VOICE_CHOICES[g]:
         CONFIG['voices'][g]['voice'] = data['voice']
@@ -921,6 +926,20 @@ async def connect(key: str):
                         f'mestre-pc open. Depois me diga para fazer o login e avisar quando terminar.')
     _connections['at'] = 0
     return {'ok': True}
+
+
+@app.get('/api/news')
+async def news_headlines(refresh: bool = False):
+    """Manchetes dos feeds do NewsFlash para a faixa de notícias."""
+    if not permissions.current().get('news', True) or not news.db_path():
+        return {'items': [], 'origem': 'desligado'}
+    try:
+        items, origem = await asyncio.get_running_loop().run_in_executor(None, news.headlines, None, None, 25, refresh)
+    except Exception as e:
+        return {'items': [], 'origem': f'erro: {e}'}
+    return {'origem': origem, 'items': [{'titulo': i['titulo'], 'fonte': i.get('fonte', ''), 'link': i['link'],
+                                         'categoria': i.get('categoria', ''), 'quando': news.when(i['data'])}
+                                        for i in items]}
 
 
 @app.get('/api/agenda')

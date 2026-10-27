@@ -110,7 +110,7 @@ button { font: inherit; }
 .quick { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .quick button { font-size: 11px; letter-spacing: 1px; padding: 9px 4px; }
 
-main { grid-area: m; display: grid; grid-template-rows: 1fr auto; min-height: 0; position: relative; z-index: 3; }
+main { grid-area: m; display: grid; grid-template-rows: 1fr auto auto; min-height: 0; position: relative; z-index: 3; }
 .reactor { position: relative; min-height: 0; display: grid; place-items: center; }
 .rings, #face, #wave { position: absolute; width: min(100%, 70vh); aspect-ratio: 1; height: auto; }
 .rings { overflow: visible; }
@@ -252,3 +252,15 @@ body.norain #rain { display: none; }
 .switch span::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--dim); transition: 0.2s; }
 .switch input:checked + span { background: rgba(0, 255, 163, 0.18); border-color: #00ffa3; }
 .switch input:checked + span::after { left: 23px; background: #00ffa3; box-shadow: 0 0 10px #00ffa3; }
+
+.ticker { display: flex; align-items: center; gap: 0; margin: 0 4% 2px; border: 1px solid var(--line); background: rgba(0, 12, 20, 0.6); height: 32px; overflow: hidden; }
+.tk-label { flex-shrink: 0; padding: 0 12px; height: 100%; display: grid; place-items: center; font-size: 10.5px; letter-spacing: 3px; color: var(--bg); background: var(--c); font-weight: 700; }
+.tk-viewport { overflow: hidden; flex: 1; height: 100%; mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
+.tk-track { display: inline-flex; white-space: nowrap; height: 100%; align-items: center; animation: tk linear infinite; }
+.tk-track:hover { animation-play-state: paused; }
+.tk-item { padding: 0 26px; font-size: 13px; color: #e8fbff; cursor: pointer; letter-spacing: 0.3px; }
+.tk-item b { color: var(--c); font-weight: 600; font-size: 10.5px; letter-spacing: 2px; margin-right: 8px; text-transform: uppercase; }
+.tk-item i { color: var(--dim); font-style: normal; font-size: 11px; margin-left: 8px; }
+.tk-item:hover { color: #fff; text-shadow: 0 0 10px var(--c); }
+.tk-item::after { content: '◆'; color: var(--line); margin-left: 26px; }
+@keyframes tk { from { transform: translateX(0); } to { transform: translateX(-50%); } }

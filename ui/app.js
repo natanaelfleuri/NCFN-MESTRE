@@ -483,6 +483,9 @@ function applySettings(s) {
   $('#pitch').value = settings.pitch ?? 1;
   $('#pitch-v').textContent = Number(settings.pitch ?? 1).toFixed(2);
   renderPerms();
+  const showTicker = settings.ticker !== false && settings.newsflash;
+  $('#ticker').classList.toggle('hidden', !showTicker);
+  if (showTicker && !tickerLoaded) loadTicker();
   $('#key-state').textContent = settings.openai_key_set ? 'Chave da OpenAI salva (só neste PC).' : 'Nenhuma chave da OpenAI salva.';
   const al = $('#always');
   al.innerHTML = '';
@@ -558,7 +561,7 @@ async function postSettings(data) {
 $$('.modes button').forEach((b) => (b.onclick = () => postSettings({ mode: b.dataset.mode })));
 $$('.seg button').forEach((b) => (b.onclick = () => {
   const key = b.parentElement.dataset.key;
-  const v = key === 'watch' || key === 'rain' ? b.dataset.v === 'true' : b.dataset.v;
+  const v = ['watch', 'rain', 'ticker'].includes(key) ? b.dataset.v === 'true' : b.dataset.v;
   if (key === 'stt' && v === 'openai' && !settings.openai_key_set) $('#openai-key').focus();
   postSettings({ [key]: v });
 }));
@@ -617,6 +620,37 @@ $('#typed').onsubmit = (e) => {
   stopSpeech();
   send({ type: 'text', text: t });
 };
+
+// ------------------------------------------------------------ faixa de notícias (NewsFlash)
+let tickerLoaded = false;
+async function loadTicker(refresh = false) {
+  tickerLoaded = true;
+  try {
+    const data = await (await fetch(`/api/news${refresh ? '?refresh=true' : ''}`)).json();
+    const track = $('#tk-track');
+    if (!data.items?.length) { $('#ticker').classList.add('hidden'); return; }
+    track.innerHTML = '';
+    // duas cópias seguidas: a animação anda metade e recomeça sem salto
+    for (let copy = 0; copy < 2; copy++) {
+      for (const it of data.items) {
+        const el = document.createElement('span');
+        el.className = 'tk-item';
+        el.innerHTML = '<b></b><span></span><i></i>';
+        el.querySelector('b').textContent = it.categoria || it.fonte;
+        el.querySelector('span').textContent = it.titulo;
+        el.querySelector('i').textContent = it.quando;
+        el.title = `${it.fonte} — clique para o MESTRE ler o resumo`;
+        el.onclick = () => {
+          stopSpeech();
+          send({ type: 'text', text: `Leia e me resuma em três frases esta notícia do ${it.fonte}: "${it.titulo}" (${it.link}). Use mestre-noticias ler.` });
+        };
+        track.append(el);
+      }
+    }
+    track.style.animationDuration = `${Math.max(60, data.items.length * 9)}s`;
+  } catch {}
+}
+setInterval(() => { if (settings.ticker !== false && settings.newsflash) loadTicker(true); }, 10 * 60 * 1000);
 
 // ------------------------------------------------------------ telemetria e relógio
 function fmtRate(b) {

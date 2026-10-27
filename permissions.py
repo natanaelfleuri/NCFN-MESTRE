@@ -23,6 +23,8 @@ PERMISSIONS = {
             True, ['WebSearch', 'WebFetch'], None),
     'browser': ('Internet', 'Navegador automático', 'Abrir sites, clicar e preencher formulários (Playwright).',
                 True, ['mcp__playwright'], None),
+    'news': ('Internet', 'Notícias (NewsFlash)', 'Ler as manchetes e notícias dos feeds que você assina no NewsFlash.',
+             True, [], r'mestre-noticias'),
     'camera': ('Dispositivos', 'Câmera', 'Tirar foto pela webcam para enxergar o ambiente.',
                False, [], r'mestre-pc\s+camera'),
     'screen': ('Dispositivos', 'Ver a tela', 'Capturar a tela para entender o que está aberto.',

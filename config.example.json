@@ -34,5 +34,6 @@
   "protected_paths": [
     "~/projetos/sistema-importante",
     "COFRE"
-  ]
+  ],
+  "ticker": true
 }

@@ -39,6 +39,7 @@ Um **guardião** fica entre o cérebro e o computador e pede confirmação antes
 | Internet | "Quais são as notícias de hoje?", "Pesquise o preço do RTX 5070 e compare três lojas." |
 | Arquivos e sistema | "Quanto espaço livre tenho?", "Liste os containers parados", "Crie um relatório em PDF sobre…" |
 | Conta Google (opcional) | "Tenho e-mails novos do banco?", "O que tenho na agenda amanhã?" |
+| Notícias (NewsFlash) | "Quais as notícias dos meus feeds?", "Leia essa notícia sobre a Apple", "Tem algo sobre o Brasileirão?" |
 | Agenda | "Me lembre às 15h de ligar para o cliente", "Todo dia útil às 8h, me dê um resumo do dia." |
 | Segundo plano | "Pesquise a fundo X e me avise quando terminar"; a conversa continua livre enquanto isso. |
 | Câmera (opcional) | "Olhe pela câmera e me diga o que vê." |
@@ -166,7 +167,7 @@ mestre-tarefa "pesquise X e salve um resumo"
 | Grupo | Permissões |
 |---|---|
 | Conexões | Gmail, Google Agenda, Google Drive, Claude Docs, Cloudflare |
-| Internet | Pesquisa na internet, navegador automático (Playwright) |
+| Internet | Pesquisa na internet, navegador automático (Playwright), notícias (NewsFlash) |
 | Dispositivos | **Câmera** (vem desligada), ver a tela, mouse e teclado, abrir programas e sites, área de transferência, som e mídia |
 | Sistema | Terminal, criar e editar arquivos, Docker, áreas protegidas |
 | Autonomia | Agenda e lembretes, tarefas em segundo plano, memória da conversa |
@@ -228,6 +229,26 @@ Na conversa, basta pedir: "me lembre…", "todo dia às…", "faça isso em segu
 
 ---
 
+## Notícias (NewsFlash)
+
+Se o leitor de RSS [NewsFlash](https://flathub.org/apps/io.gitlab.news_flash.NewsFlash) estiver instalado (Flatpak ou nativo), o MESTRE usa **as suas assinaturas e categorias** dele:
+
+- **Faixa de manchetes:** passa embaixo do símbolo, atualizada a cada 10 minutos. Clicar numa manchete faz o MESTRE ler e resumir a notícia.
+- **Por voz:** "quais as notícias?", "notícias de esportes", "leia essa", "tem algo sobre X?".
+- **Comando `mestre-noticias`:**
+  ```bash
+  mestre-noticias manchetes [--categoria TECNOLOGIA] [--fonte X] [--n 15]
+  mestre-noticias feeds
+  mestre-noticias buscar "termo"
+  mestre-noticias ler <url>
+  mestre-noticias abrir        # abre o aplicativo NewsFlash
+  ```
+- **Origem das notícias:** as manchetes vêm **ao vivo** dos feeds, então não dependem de o NewsFlash ter sincronizado. Sem internet, ele usa as notícias guardadas pelo NewsFlash.
+- **Banco do NewsFlash:** é aberto **só para leitura**. Para assinar ou remover feeds, use o próprio NewsFlash.
+- **Desligar:** em Configurações, a permissão **Notícias (NewsFlash)** e a opção **Faixa de notícias**.
+
+---
+
 ## Estrutura do projeto
 
 ```
@@ -239,6 +260,8 @@ hooks/guard.py       guardião: confirmação, "sempre permitidos" e permissões
 bin/mestre-pc        tela, mouse, teclado, janelas, câmera, área de transferência, volume
 bin/mestre-agenda    lembretes e tarefas agendadas
 bin/mestre-tarefa    tarefas em segundo plano
+bin/mestre-noticias  notícias dos feeds do NewsFlash
+news.py              leitura do NewsFlash e dos feeds RSS/Atom
 ui/                  interface: index.html, style.css, app.js, symbol.js (símbolo NCFN)
 install/             modelos do serviço systemd, do lançador e do atalho
 config.example.json  configuração inicial (vira config.json)
@@ -257,6 +280,7 @@ APIs HTTP:
 - `GET /api/stats` e `GET/POST /api/settings`;
 - `GET /api/connections` e `POST /api/connect/{id}`;
 - `GET/POST/DELETE /api/agenda` e `POST /api/task`;
+- `GET /api/news` (manchetes do NewsFlash);
 - `POST /api/window/{minimize|maximize|close}`.
 
 ---

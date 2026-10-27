@@ -59,7 +59,7 @@
     <div class="quick">
       <button data-q="Faça um resumo rápido do estado do sistema e dos meus serviços.">Estado do sistema</button>
       <button data-q="Tire uma captura da minha tela e me diga o que você vê.">O que há na tela?</button>
-      <button data-q="Quais são as principais notícias de hoje no Brasil e no mundo? Seja breve.">Notícias</button>
+      <button data-q="Quais são as principais notícias dos meus feeds do NewsFlash agora? Me dê as cinco mais importantes, uma frase cada.">Notícias</button>
       <button data-q="O que tenho na agenda?">Minha agenda</button>
     </div>
   </aside>
@@ -87,6 +87,11 @@
         <div><span id="status-dot"></span><span id="status">Inicializando</span></div>
         <div id="action" class="action"></div>
       </div>
+    </div>
+
+    <div id="ticker" class="ticker hidden">
+      <div class="tk-label">NEWSFLASH</div>
+      <div class="tk-viewport"><div id="tk-track" class="tk-track"></div></div>
     </div>
 
     <div class="controls">
@@ -150,6 +155,10 @@
           <div class="seg" data-key="rain" style="margin-top:8px">
             <button data-v="true">Chuva de números</button>
             <button data-v="false">Fundo limpo</button>
+          </div>
+          <div class="seg" data-key="ticker" style="margin-top:8px">
+            <button data-v="true">Faixa de notícias</button>
+            <button data-v="false">Sem faixa</button>
           </div>
           <h3>Reconhecimento de voz</h3>
           <div class="seg" data-key="stt">

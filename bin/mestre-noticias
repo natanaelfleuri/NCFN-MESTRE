@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+import os as _os
+import sys as _sys
+
+_VENV = _os.path.join(_os.path.dirname(_os.path.realpath(__file__)), '..', '.venv', 'bin', 'python')
+if _os.path.exists(_VENV) and _os.path.realpath(_sys.prefix) != _os.path.realpath(_os.path.join(_os.path.dirname(_VENV), '..')):
+    _os.execv(_VENV, [_VENV, *_sys.argv])
+"""mestre-noticias: notícias dos feeds que o usuário assina no NewsFlash.
+
+  mestre-noticias manchetes [--categoria X] [--fonte X] [--n 15] [--atualizar]
+  mestre-noticias feeds                 assinaturas, categorias e não lidas
+  mestre-noticias buscar "termo"        busca nas notícias guardadas e nas atuais
+  mestre-noticias ler <url>             texto completo de uma notícia
+  mestre-noticias abrir                 abre o aplicativo NewsFlash
+
+As manchetes vêm ao vivo dos feeds (cache de 10 min); sem internet, das
+guardadas pelo NewsFlash. O banco do NewsFlash é aberto só para leitura.
+"""
+import subprocess
+import sys
+
+sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.realpath(__file__)), '..'))
+import news  # noqa: E402
+
+
+def opt(args, name, default=None):
+    if name in args:
+        k = args.index(name)
+        val = args[k + 1] if k + 1 < len(args) else default
+        del args[k:k + 2]
+        return val
+    return default
+
+
+def show(items):
+    for i, it in enumerate(items, 1):
+        print(f"{i}. {it['titulo']}")
+        print(f"   {it.get('fonte', '')} · {it.get('categoria', '') or '-'} · {news.when(it['data'])}")
+        if it.get('resumo'):
+            print(f"   {it['resumo']}")
+        print(f"   {it['link']}")
+
+
+a = sys.argv[1:]
+cmd = a.pop(0) if a else 'manchetes'
+try:
+    if cmd in ('manchetes', 'ultimas'):
+        cat, fonte, n = opt(a, '--categoria'), opt(a, '--fonte'), int(opt(a, '--n', 15))
+        refresh = '--atualizar' in a
+        items, origem = news.headlines(cat, fonte, n, refresh)
+        print(f'Manchetes ({origem}):')
+        show(items)
+    elif cmd == 'feeds':
+        for f in news.feeds():
+            print(f"- {f['nome']} [{f['categoria'] or 'sem categoria'}] {f['nao_lidas']} não lidas · {f['site']}")
+    elif cmd == 'buscar':
+        show(news.search(' '.join(a)))
+    elif cmd == 'ler':
+        print(news.read_article(a[0]))
+    elif cmd == 'abrir':
+        subprocess.Popen(['flatpak', 'run', news.APP_ID], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print('NewsFlash aberto.')
+    else:
+        print(__doc__)
+except RuntimeError as e:
+    print(e)
+    sys.exit(1)
