@@ -1,0 +1,14 @@
+[Unit]
+Description=MESTRE — assistente de voz (servidor local)
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=__MESTRE_DIR__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -c 'export LD_LIBRARY_PATH=$(cat __MESTRE_DIR__/.cuda_libs 2>/dev/null); export PATH=%h/.local/bin:__MESTRE_DIR__/bin:/usr/local/bin:/usr/bin:/bin; exec __MESTRE_DIR__/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 7777 --log-level warning'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

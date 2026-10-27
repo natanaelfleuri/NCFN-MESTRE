@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+import os as _os
+import sys as _sys
+
+_VENV = _os.path.join(_os.path.dirname(_os.path.realpath(__file__)), '..', '.venv', 'bin', 'python')
+if _os.path.exists(_VENV) and _os.path.realpath(_sys.prefix) != _os.path.realpath(_os.path.join(_os.path.dirname(_VENV), '..')):
+    _os.execv(_VENV, [_VENV, *_sys.argv])
+"""mestre-agenda: lembretes e tarefas agendadas do MESTRE.
+
+  mestre-agenda listar
+  mestre-agenda lembrete "AAAA-MM-DD HH:MM" "texto"   [--repetir diario|dias-uteis|semanal|horas:N|minutos:N]
+  mestre-agenda lembrete "+30m" "texto"               (também +2h, +1d)
+  mestre-agenda tarefa  "AAAA-MM-DD HH:MM" "o que fazer sozinho"  [--repetir ...]
+  mestre-agenda remover <id>
+
+Lembrete: o MESTRE fala e mostra uma notificação na hora marcada.
+Tarefa: o MESTRE executa o pedido sozinho em segundo plano e fala o resultado.
+"""
+import json
+import os
+import re
+import sys
+import urllib.request
+from datetime import datetime, timedelta
+
+URL = os.environ.get('MESTRE_URL', 'http://127.0.0.1:7777')
+
+
+def call(method, path, data=None):
+    req = urllib.request.Request(URL + path, method=method, data=json.dumps(data).encode() if data else None,
+                                 headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
+
+
+def parse_when(s):
+    m = re.fullmatch(r'\+(\d+(?:\.\d+)?)\s*([mhd])', s.strip())
+    if m:
+        n, unit = float(m.group(1)), m.group(2)
+        return (datetime.now() + timedelta(**{'m': {'minutes': n}, 'h': {'hours': n}, 'd': {'days': n}}[unit])).timestamp()
+    for fmt in ('%Y-%m-%d %H:%M', '%Y-%m-%dT%H:%M', '%d/%m/%Y %H:%M', '%H:%M'):
+        try:
+            dt = datetime.strptime(s.strip(), fmt)
+            if fmt == '%H:%M':
+                dt = datetime.combine(datetime.now().date(), dt.time())
+                if dt < datetime.now():
+                    dt += timedelta(days=1)
+            return dt.timestamp()
+        except ValueError:
+            pass
+    sys.exit(f'Data inválida: {s}')
+
+
+def main(a):
+    if not a or a[0] in ('-h', '--help', 'help'):
+        print(__doc__)
+        return
+    cmd = a[0]
+    if cmd == 'listar':
+        items = call('GET', '/api/agenda')
+        if not items:
+            print('Agenda vazia.')
+        for i in items:
+            when = datetime.fromtimestamp(i['when']).strftime('%d/%m %H:%M')
+            print(f"{i['id']}  {when}  {i['kind']:<8} {('(' + i['repeat'] + ')') if i.get('repeat') else '':<14} {i['text']}")
+    elif cmd in ('lembrete', 'tarefa'):
+        repeat = None
+        if '--repetir' in a:
+            k = a.index('--repetir')
+            repeat = a[k + 1]
+            a = a[:k] + a[k + 2:]
+        item = call('POST', '/api/agenda', {'when': parse_when(a[1]), 'text': ' '.join(a[2:]), 'kind': cmd, 'repeat': repeat})
+        print(f"Agendado {item['kind']} {item['id']} para {datetime.fromtimestamp(item['when']):%d/%m/%Y %H:%M}"
+              + (f" (repete: {repeat})" if repeat else ''))
+    elif cmd == 'remover':
+        call('DELETE', f'/api/agenda/{a[1]}')
+        print('Removido.')
+    else:
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

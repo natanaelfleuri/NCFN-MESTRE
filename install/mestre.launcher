@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# MESTRE: liga o servidor local e abre a interface numa janela de aplicativo.
+# Com a janela já aberta (ou minimizada), traz ela de volta. O ✕ da janela fecha
+# tudo e desliga o servidor.
+#   mestre          abre / traz para frente
+#   mestre status   diz se está ligado
+#   mestre stop     desliga
+URL="http://127.0.0.1:7777/?auto"
+PROFILE="__MESTRE_DIR__/state/chrome"
+DESKTOP_FILE="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")/mestre.desktop"
+
+running() { systemctl --user is-active --quiet mestre.service; }
+window_open() { pgrep -f -- "--user-data-dir=$PROFILE" >/dev/null; }
+marcar() {
+  [[ -f "$DESKTOP_FILE" ]] || return 0
+  if [[ "$1" == on ]]; then sed -i 's/^Name=.*/Name=🟢 MESTRE (ligado)/' "$DESKTOP_FILE"
+  else sed -i 's/^Name=.*/Name=MESTRE/' "$DESKTOP_FILE"; fi
+  gio set "$DESKTOP_FILE" metadata::trusted true 2>/dev/null
+}
+stop_all() {
+  # O ✕ da janela chama isto de dentro do serviço: parar o serviço encerra este
+  # script junto, então o ícone é acertado antes.
+  marcar off
+  pkill -f -- "--user-data-dir=$PROFILE" 2>/dev/null
+  systemctl --user stop mestre.service
+}
+
+case "${1:-}" in
+  status) if running; then echo "MESTRE ligado"; else echo "MESTRE desligado"; fi; exit 0 ;;
+  stop) stop_all; notify-send -i "$HOME/.local/share/icons/mestre.svg" "MESTRE" "Desligado."; exit 0 ;;
+esac
+
+# Já aberto (mesmo minimizado): traz a janela de volta, em tela cheia.
+# Para fechar, use o ✕ da janela ou `mestre stop`.
+if running && window_open; then
+  "__MESTRE_DIR__/bin/mestre-pc" focus MESTRE >/dev/null 2>&1
+  sleep 0.3
+  "__MESTRE_DIR__/bin/mestre-pc" fullscreen MESTRE >/dev/null 2>&1
+  exit 0
+fi
+
+# Janela aberta sem servidor (ou o contrário): liga o que falta.
+# O serviço precisa da tela da sessão atual para controlar janelas, capturar a tela etc.
+systemctl --user import-environment DISPLAY XAUTHORITY 2>/dev/null
+systemctl --user start mestre.service
+for _ in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:7777/ && break; sleep 0.5; done
+marcar on
+# A janela já existe: o servidor voltou e ela se reconecta sozinha.
+window_open && exit 0
+mkdir -p "$PROFILE"
+# Perfil próprio: microfone liberado só para 127.0.0.1:7777, áudio sem clique.
+# Quiosque: tela cheia de verdade. Alt+F4 fecha a janela (o servidor segue até
+# o botão ser clicado de novo).
+google-chrome --user-data-dir="$PROFILE" --app="$URL" --kiosk \
+  --autoplay-policy=no-user-gesture-required \
+  --no-first-run --no-default-browser-check --class=MESTRE >/dev/null 2>&1 &
+disown
+# O gerenciador de janelas ignora o --kiosk: pede a tela cheia direto ao X11.
+for _ in $(seq 1 40); do
+  "__MESTRE_DIR__/bin/mestre-pc" fullscreen MESTRE >/dev/null 2>&1 && break
+  sleep 0.25
+done

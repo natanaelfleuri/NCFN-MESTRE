@@ -1,0 +1,13 @@
+# ambiente e modelos (o install.sh recria)
+.venv/
+models/
+.cuda_libs
+__pycache__/
+*.pyc
+
+# estado local: chaves de API, permissões, sessão, agenda, perfil do Chrome
+state/
+
+# configuração e contexto pessoais (partem de config.example.json / persona.md)
+config.json
+persona.local.md

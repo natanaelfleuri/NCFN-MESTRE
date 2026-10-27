@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+websockets
+psutil
+numpy
+faster-whisper
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
+kokoro>=0.9.4
+soundfile
+piper-tts
+pynput
+python-xlib
+pillow
+opencv-python-headless

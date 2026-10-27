@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <radialGradient id="g" r=".55"><stop offset="0" stop-color="#7df9ff" stop-opacity=".9"/><stop offset=".5" stop-color="#00e5ff" stop-opacity=".25"/><stop offset="1" stop-color="#001018" stop-opacity="0"/></radialGradient>
+    <filter id="b"><feGaussianBlur stdDeviation="1.2"/></filter>
+  </defs>
+  <rect width="128" height="128" rx="26" fill="#02060c"/>
+  <circle cx="64" cy="64" r="54" fill="url(#g)"/>
+  <circle cx="64" cy="64" r="52" fill="none" stroke="#00e5ff" stroke-width="1.5" stroke-dasharray="3 5" opacity=".7"/>
+  <g fill="none" stroke="#00e5ff" stroke-width="1.4" opacity=".55">
+    <path d="M64 12 L64 22 M64 106 L64 116 M12 64 L22 64 M106 64 L116 64 M27 27 L34 34 M94 94 L101 101 M101 27 L94 34 M27 101 L34 94"/>
+  </g>
+  <polygon points="64,26 97,45 97,83 64,102 31,83 31,45" fill="none" stroke="#00e5ff" stroke-width="2.5"/>
+  <polygon points="64,26 97,45 97,83 64,102 31,83 31,45" fill="none" stroke="#7df9ff" stroke-width="5" opacity=".35" filter="url(#b)"/>
+  <g fill="none" stroke="#e8fbff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M38 73 V55 L48 73 V55"/>
+    <path d="M62 56.5 L60.5 55 H54.5 L53 56.5 V71.5 L54.5 73 H60.5 L62 71.5"/>
+    <path d="M75 55 H67 V73 M67 64 H73"/>
+    <path d="M80 73 V55 L90 73 V55"/>
+  </g>
+</svg>

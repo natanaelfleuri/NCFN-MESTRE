@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MESTRE</title>
+<link rel="icon" href="/ui/icon.svg">
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body data-state="boot" data-gender="masculino">
+  <canvas id="rain"></canvas>
+  <div class="bg-grid"></div>
+  <div class="vignette"></div>
+  <div class="scan"></div>
+
+  <header>
+    <div class="brand">
+      <div class="logo">M<span>.</span>E<span>.</span>S<span>.</span>T<span>.</span>R<span>.</span>E</div>
+      <div class="sub">Módulo Executivo de Sistemas, Tarefas e Recursos Eletrônicos</div>
+    </div>
+    <div class="head-right">
+      <div class="clock">
+        <div id="time">--:--:--</div>
+        <div id="date">—</div>
+      </div>
+      <div class="winbtns">
+        <button id="w-settings" title="Configurações">⚙</button>
+        <button id="w-min" title="Minimizar">–</button>
+        <button id="w-max" title="Maximizar / restaurar">▢</button>
+        <button id="w-close" class="close" title="Fechar o MESTRE">✕</button>
+      </div>
+    </div>
+  </header>
+
+  <aside class="panel left">
+    <h2>Telemetria</h2>
+    <div class="meter" data-k="cpu"><span>CPU</span><b></b><i></i></div>
+    <div class="meter" data-k="ram"><span>Memória</span><b></b><i></i></div>
+    <div class="meter" data-k="gpu"><span>GPU</span><b></b><i></i></div>
+    <div class="meter" data-k="vram"><span>VRAM</span><b></b><i></i></div>
+    <div class="meter" data-k="disk"><span>Disco</span><b></b><i></i></div>
+    <div class="facts">
+      <div><span>Rede</span><b id="net">—</b></div>
+      <div><span>Containers</span><b id="containers">—</b></div>
+      <div><span>GPU temp.</span><b id="gputemp">—</b></div>
+      <div><span>Ativo há</span><b id="uptime">—</b></div>
+      <div><span>Núcleo</span><b id="brain">—</b></div>
+      <div><span>Tarefas</span><b id="jobs">—</b></div>
+      <div><span>Agenda</span><b id="agenda-n">—</b></div>
+    </div>
+    <h2>Escuta</h2>
+    <div class="modes">
+      <button data-mode="free" title="Ouve e responde a tudo">Conversa livre</button>
+      <button data-mode="wake" title="Só responde quando ouve 'Mestre'">Com “Mestre”</button>
+      <button data-mode="ptt" title="Só escuta enquanto o espaço estiver apertado">Apertar p/ falar</button>
+    </div>
+    <p class="hint" id="hint"></p>
+    <h2>Atalhos</h2>
+    <div class="quick">
+      <button data-q="Faça um resumo rápido do estado do sistema e dos meus serviços.">Estado do sistema</button>
+      <button data-q="Tire uma captura da minha tela e me diga o que você vê.">O que há na tela?</button>
+      <button data-q="Quais são as principais notícias de hoje no Brasil e no mundo? Seja breve.">Notícias</button>
+      <button data-q="O que tenho na agenda?">Minha agenda</button>
+    </div>
+  </aside>
+
+  <main>
+    <div class="reactor">
+      <svg class="rings" viewBox="-300 -300 600 600">
+        <defs>
+          <radialGradient id="core" r="1">
+            <stop offset="0" stop-color="var(--c)" stop-opacity=".2"/>
+            <stop offset=".6" stop-color="var(--c)" stop-opacity=".04"/>
+            <stop offset="1" stop-color="var(--c)" stop-opacity="0"/>
+          </radialGradient>
+        </defs>
+        <circle r="290" fill="url(#core)"/>
+        <g class="r r1"><circle r="282" class="thin"/><path class="arc" d="M 0 -282 A 282 282 0 0 1 244 141"/></g>
+        <g class="r r2"><circle r="262" class="dash"/></g>
+        <g class="r r3"><path class="arc w" d="M -248 0 A 248 248 0 0 1 0 -248"/><path class="arc w" d="M 248 0 A 248 248 0 0 1 0 248"/></g>
+        <g class="r r4" id="ticks"></g>
+        <g class="r r5"><circle r="214" class="thin"/><path class="arc" d="M 0 214 A 214 214 0 0 1 -185 -107"/></g>
+      </svg>
+      <canvas id="wave"></canvas>
+      <canvas id="face"></canvas>
+      <div class="status">
+        <div><span id="status-dot"></span><span id="status">Inicializando</span></div>
+        <div id="action" class="action"></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="new" title="Nova conversa">⟲</button>
+      <button id="mic" class="mic" title="Segure para falar (ou a barra de espaço)">
+        <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-3.08A7 7 0 0 0 19 12z"/></svg>
+      </button>
+      <button id="stop" title="Interromper (Esc)">■</button>
+      <button id="open-settings" class="cfg" title="Configurações: voz, imagem, reconhecimento…">⚙ Configurações</button>
+      <form id="typed"><input id="text" autocomplete="off" placeholder="…ou digite um comando"></form>
+    </div>
+  </main>
+
+  <aside class="panel right">
+    <h2>Conversa e operações</h2>
+    <ol id="log"></ol>
+  </aside>
+
+  <!-- confirmação de ação protegida -->
+  <div id="confirm" class="modal hidden">
+    <div class="card warn">
+      <div class="card-h">⚠ Ação protegida</div>
+      <div id="confirm-why" class="why"></div>
+      <pre id="confirm-what"></pre>
+      <div class="choices">
+        <button data-choice="always">Confirmar sempre</button>
+        <button data-choice="once" class="primary">Só desta vez</button>
+        <button data-choice="deny" class="deny">Negar</button>
+      </div>
+      <div class="foot">Também por voz: “confirmo”, “confirmo sempre” ou “cancela”.</div>
+    </div>
+  </div>
+
+  <!-- ajustes -->
+  <div id="settings" class="modal hidden">
+    <div class="card wide">
+      <div class="card-h">Configurações <button class="x" id="settings-close">✕</button></div>
+      <div class="grid2">
+        <section>
+          <h3>Voz e símbolo</h3>
+          <div class="seg" data-key="gender">
+            <button data-v="masculino">Masculina · angular</button>
+            <button data-v="feminino">Feminina · fluida</button>
+          </div>
+          <div class="voicerow">
+            <select id="voice"></select>
+            <label>Tom <input id="pitch" type="range" min="0.75" max="1.15" step="0.01"><b id="pitch-v"></b></label>
+            <button id="test-voice">Testar voz</button>
+          </div>
+          <h3>Imagem</h3>
+          <div class="swatches" id="theme">
+            <button data-v="auto" title="Automática (ciano masculino, rosa feminino)">Auto</button>
+            <button data-v="ciano" style="--s:#00e5ff"></button>
+            <button data-v="verde" style="--s:#00ffa3"></button>
+            <button data-v="ambar" style="--s:#ffb300"></button>
+            <button data-v="vermelho" style="--s:#ff3d57"></button>
+            <button data-v="roxo" style="--s:#b388ff"></button>
+            <button data-v="rosa" style="--s:#ff5fd2"></button>
+            <button data-v="branco" style="--s:#e8f4ff"></button>
+          </div>
+          <div class="seg" data-key="rain" style="margin-top:8px">
+            <button data-v="true">Chuva de números</button>
+            <button data-v="false">Fundo limpo</button>
+          </div>
+          <h3>Reconhecimento de voz</h3>
+          <div class="seg" data-key="stt">
+            <button data-v="local">Whisper local (GPU)</button>
+            <button data-v="openai">API da OpenAI</button>
+          </div>
+          <div class="keyrow">
+            <input id="openai-key" type="password" autocomplete="off" placeholder="Chave da OpenAI (sk-…)">
+            <button id="save-key">Salvar</button>
+          </div>
+          <div class="note" id="key-state"></div>
+          <h3>Cérebro</h3>
+          <div class="seg" data-key="model">
+            <button data-v="opus">Opus · mais capaz</button>
+            <button data-v="sonnet">Sonnet · mais rápido</button>
+          </div>
+          <h3>Vigilância do sistema</h3>
+          <div class="seg" data-key="watch">
+            <button data-v="true">Ativa</button>
+            <button data-v="false">Desligada</button>
+          </div>
+        </section>
+        <section class="full">
+          <h3>Conexões e permissões
+            <span class="h3-actions">
+              <button id="conn-refresh">Atualizar status</button>
+              <button id="conn-manage">Gerenciar no claude.ai</button>
+            </span>
+          </h3>
+          <div id="perms" class="perms"></div>
+          <div class="note">O que estiver desligado o MESTRE não usa nem pede para usar. Ações perigosas continuam pedindo confirmação mesmo com a permissão ligada.</div>
+        </section>
+        <section>
+          <h3>Sempre permitidos</h3>
+          <ul id="always" class="list"></ul>
+          <h3>Agenda</h3>
+          <ul id="agenda" class="list"></ul>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="boot" class="boot">
+    <div class="boot-inner">
+      <div class="logo big">M.E.S.T.R.E</div>
+      <div id="boot-lines"></div>
+      <button id="start">Iniciar</button>
+    </div>
+  </div>
+
+  <script type="module" src="/ui/app.js"></script>
+</body>
+</html>

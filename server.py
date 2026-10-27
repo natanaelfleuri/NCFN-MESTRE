@@ -1,0 +1,1026 @@
+"""MESTRE — servidor local do assistente de voz.
+
+Ouvido: Whisper large-v3-turbo na GPU (padrão) ou a API da OpenAI.
+Cérebro: Claude Code em modo contínuo (stream-json), com o guardião
+(hooks/guard.py) pedindo confirmação para o que é perigoso.
+Voz: Kokoro (masculina grave ou feminina), Piper como reserva, falada frase
+a frase enquanto a resposta chega.
+Autonomia: agenda (lembretes e tarefas), tarefas em segundo plano e
+vigilância do sistema, que avisa sozinha.
+
+A interface (ui/) conversa por WebSocket em /ws.
+"""
+import asyncio
+import base64
+import io
+import json
+import os
+import re
+import subprocess
+import time
+import uuid
+import wave
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import numpy as np
+import permissions
+import psutil
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+ROOT = Path(__file__).resolve().parent
+HOME = Path.home()
+STATE = ROOT / 'state'
+STATE.mkdir(exist_ok=True)
+WORK = (HOME / 'Documentos' if (HOME / 'Documentos').is_dir() else HOME / 'Documents') / 'MESTRE'
+(WORK / 'relatorios').mkdir(parents=True, exist_ok=True)
+CONFIG_FILE = ROOT / 'config.json'
+if not CONFIG_FILE.exists():  # primeira execução: parte do exemplo
+    CONFIG_FILE.write_text((ROOT / 'config.example.json').read_text())
+CONFIG = json.loads(CONFIG_FILE.read_text())
+PENDING = STATE / 'pending.json'
+APPROVED = STATE / 'approved.json'
+ALWAYS = STATE / 'always.json'
+SECRETS = STATE / 'secrets.json'
+AGENDA = STATE / 'agenda.json'
+SESSION_FILE = STATE / 'session.json'
+
+STT_POOL = ThreadPoolExecutor(max_workers=1)
+TTS_POOL = ThreadPoolExecutor(max_workers=1)
+
+
+def save_config():
+    CONFIG_FILE.write_text(json.dumps(CONFIG, ensure_ascii=False, indent=2))
+
+
+def secrets():
+    try:
+        return json.loads(SECRETS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+# ================================================================ ouvido
+_whisper = None
+
+
+def whisper():
+    global _whisper
+    if _whisper is None:
+        from faster_whisper import WhisperModel
+        _whisper = WhisperModel(CONFIG['whisper_model'], device='cuda', compute_type='float16',
+                                download_root=str(ROOT / 'models' / 'whisper'))
+    return _whisper
+
+
+HALLUCINATIONS = re.compile(
+    r'^(obrigad[oa]( por assistir)?|legendas? (pela|por) .*|tchau|\.+|amara\.org.*|inscreva-se.*|'
+    r'e aí|hum+|ah+|é+|uhum|música|aplausos|risos|sous-titrage.*|transcrição.*|assistente de voz.*|'
+    r'a mão|ok|tá|sim|não)[.!?]*$', re.I)
+
+
+def pcm_to_wav(pcm16: bytes, rate=16000) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm16)
+    return buf.getvalue()
+
+
+def transcribe_openai(pcm16: bytes) -> str:
+    import urllib.request
+    key = secrets().get('openai_api_key') or os.environ.get('OPENAI_API_KEY')
+    if not key:
+        raise RuntimeError('Chave da OpenAI não configurada')
+    boundary = uuid.uuid4().hex
+    body = io.BytesIO()
+    for name, value in (('model', CONFIG.get('openai_stt_model', 'gpt-4o-transcribe')), ('language', 'pt')):
+        body.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+    body.write(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="fala.wav"\r\n'
+               f'Content-Type: audio/wav\r\n\r\n'.encode())
+    body.write(pcm_to_wav(pcm16))
+    body.write(f'\r\n--{boundary}--\r\n'.encode())
+    req = urllib.request.Request('https://api.openai.com/v1/audio/transcriptions', data=body.getvalue(),
+                                 headers={'Authorization': f'Bearer {key}',
+                                          'Content-Type': f'multipart/form-data; boundary={boundary}'})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read()).get('text', '').strip()
+
+
+def transcribe(pcm16: bytes) -> str:
+    audio = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32) / 32768.0
+    if len(audio) < 16000 * 0.35 or float(np.sqrt(np.mean(audio ** 2))) < 0.004:
+        return ''
+    if CONFIG.get('stt') == 'openai':
+        try:
+            text = transcribe_openai(pcm16)
+        except Exception as e:
+            print('[stt] OpenAI falhou, usando Whisper local:', e, flush=True)
+            text = None
+        if text is not None:
+            return '' if HALLUCINATIONS.match(text) else text
+    segs, _ = whisper().transcribe(audio, language='pt', beam_size=5, vad_filter=True,
+                                   condition_on_previous_text=False, no_speech_threshold=0.5,
+                                   vad_parameters={'min_silence_duration_ms': 400, 'threshold': 0.5})
+    # Descarta trechos que o próprio Whisper acha que são silêncio ou chute.
+    kept = [s.text.strip() for s in segs if s.no_speech_prob < 0.55 and s.avg_logprob > -0.9]
+    text = ' '.join(kept).strip()
+    if not text or HALLUCINATIONS.match(text):
+        return ''
+    print(f'[stt] {text}', flush=True)
+    return text
+
+
+# ================================================================ voz
+_kokoro = None
+_piper = None
+
+
+def kokoro():
+    global _kokoro
+    if _kokoro is None:
+        import torch
+        from kokoro import KPipeline
+        _kokoro = KPipeline(lang_code='p', repo_id='hexgrad/Kokoro-82M',
+                            device='cuda' if torch.cuda.is_available() else 'cpu')
+    return _kokoro
+
+
+def piper():
+    global _piper
+    if _piper is None:
+        from piper import PiperVoice
+        _piper = PiperVoice.load(str(ROOT / 'models' / 'piper' / 'pt_BR-faber-medium.onnx'))
+    return _piper
+
+
+def voice_profile():
+    return CONFIG['voices'][CONFIG.get('gender', 'masculino')]
+
+
+def wav_bytes(samples: np.ndarray, rate: int) -> bytes:
+    pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16).tobytes()
+    return pcm_to_wav(pcm, rate)
+
+
+def synthesize(text: str) -> bytes:
+    """Fala com o perfil da voz atual. O tom grave vem de tocar o áudio numa
+    taxa menor (pitch < 1), com a fala gerada mais rápida na mesma proporção
+    para a duração não mudar."""
+    prof = voice_profile()
+    pitch = prof.get('pitch', 1.0)
+    speed = prof.get('speed', 1.0)
+    if prof.get('voice', '').startswith('piper'):
+        prof = {**prof, 'engine': 'piper'}
+    if prof.get('engine', 'kokoro') == 'kokoro':
+        try:
+            parts = [a.numpy() if hasattr(a, 'numpy') else a
+                     for _, _, a in kokoro()(text, voice=prof['voice'], speed=speed / pitch)]
+            audio = np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
+            return wav_bytes(audio, int(24000 * pitch))
+        except Exception as e:
+            print('[tts] Kokoro falhou, usando Piper:', e, flush=True)
+    from piper import SynthesisConfig
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        piper().synthesize_wav(text, w, syn_config=SynthesisConfig(length_scale=0.95 * pitch))
+    with wave.open(io.BytesIO(buf.getvalue())) as r:
+        rate, frames = r.getframerate(), r.readframes(r.getnframes())
+    return pcm_to_wav(frames, int(rate * pitch))
+
+
+def speakable(text: str) -> str:
+    t = re.sub(r'```.*?```', ' ', text, flags=re.S)
+    t = re.sub(r'`([^`]*)`', r'\1', t)
+    t = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', t)
+    t = re.sub(r'https?://\S+', 'o link', t)
+    t = re.sub(r'[*_#>|~]+', ' ', t)
+    t = re.sub(r'^\s*[-•]\s+', '', t, flags=re.M)
+    t = t.replace('%', ' por cento').replace('&', ' e ').replace('/', ' barra ')
+    return re.sub(r'\s+', ' ', t).strip()
+
+
+# ================================================================ cérebro
+EMOTIONS = ('neutro', 'feliz', 'sorriso', 'empolgado', 'confiante', 'ironico', 'pensativo', 'curioso', 'surpreso',
+            'preocupado', 'triste', 'determinado', 'serio', 'alerta')
+EMO_TAG = re.compile(r'\s*\[(\w+)\]\s*')
+
+
+def strip_tags(text: str) -> str:
+    return EMO_TAG.sub(lambda m: ' ' if m.group(1).lower() in EMOTIONS else m.group(0), text)
+
+
+def persona_prompt():
+    base = (ROOT / 'persona.md').read_text()
+    local = ROOT / 'persona.local.md'  # contexto pessoal, fora do git
+    if local.exists():
+        base += '\n\n' + local.read_text()
+    if CONFIG.get('gender') == 'feminino':
+        base += ('\n\n## Gênero\nNesta configuração sua voz e seu rosto são femininos: fale de si no '
+                 'feminino ("estou pronta", "fiquei curiosa"). Seu nome continua MESTRE.\n')
+    return base
+
+
+def claude_settings_file():
+    settings = {'hooks': {'PreToolUse': [{'matcher': '*', 'hooks': [
+        {'type': 'command', 'command': f'{ROOT}/.venv/bin/python {ROOT}/hooks/guard.py'}]}]}}
+    path = STATE / 'settings.json'
+    path.write_text(json.dumps(settings))
+    return path
+
+
+def claude_env():
+    return {**os.environ, 'MESTRE_STATE': str(STATE), 'MESTRE_URL': f"http://127.0.0.1:{CONFIG['port']}",
+            'PATH': f"{ROOT / 'bin'}:{HOME / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
+            'DISPLAY': os.environ.get('DISPLAY') or detect_display(),
+            'XAUTHORITY': os.environ.get('XAUTHORITY') or f'/run/user/{os.getuid()}/gdm/Xauthority'}
+
+
+def detect_display():
+    try:
+        socks = sorted(f for f in os.listdir('/tmp/.X11-unix') if f.startswith('X'))
+        return ':' + socks[0][1:] if socks else ':0'
+    except OSError:
+        return ':0'
+
+
+def claude_flags():
+    blocked = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', *permissions.disallowed_tools(permissions.current())]
+    return ['--permission-mode', 'bypassPermissions', '--disallowedTools', ','.join(blocked)]
+
+
+class Brain:
+    """Um processo `claude -p` contínuo (stream-json) que guarda a conversa."""
+
+    def __init__(self, emit):
+        self.emit = emit
+        self.proc = None
+        self.busy = False
+        self.session = None
+        self.at_message_start = True
+        self.head = ''
+        self.restart_when_idle = False
+        # Sem a permissão "Memória da conversa", cada abertura começa do zero.
+        if permissions.current().get('memory', True):
+            try:
+                self.session = json.loads(SESSION_FILE.read_text()).get('session_id')
+            except (OSError, ValueError):
+                pass
+
+    async def start(self):
+        cmd = ['claude', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
+               '--verbose', '--include-partial-messages', *claude_flags(),
+               '--settings', str(claude_settings_file()), '--append-system-prompt', persona_prompt(),
+               '--model', CONFIG['model']]
+        if self.session:
+            cmd += ['--resume', self.session]
+        self.proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=str(HOME), env=claude_env(), stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=16 * 1024 * 1024)
+        asyncio.create_task(self._read(self.proc))
+        asyncio.create_task(self._stderr(self.proc))
+
+    async def _stderr(self, proc):
+        async for line in proc.stderr:
+            msg = line.decode(errors='replace').strip()
+            if msg:
+                print('[claude]', msg[:300], flush=True)
+
+    async def ask(self, text: str):
+        if not self.proc or self.proc.returncode is not None:
+            await self.start()
+        self.busy = True
+        line = json.dumps({'type': 'user', 'message': {'role': 'user', 'content': text}}, ensure_ascii=False)
+        self.proc.stdin.write((line + '\n').encode())
+        await self.proc.stdin.drain()
+
+    async def interrupt(self):
+        if self.proc and self.busy and self.proc.returncode is None:
+            req = {'type': 'control_request', 'request_id': f'int-{time.time()}', 'request': {'subtype': 'interrupt'}}
+            self.proc.stdin.write((json.dumps(req) + '\n').encode())
+            await self.proc.stdin.drain()
+
+    async def restart(self, keep_session=True):
+        if not keep_session:
+            self.session = None
+            SESSION_FILE.unlink(missing_ok=True)
+        old = self.proc
+        self.proc = None
+        if old and old.returncode is None:
+            old.kill()
+        self.busy = False
+        await self.start()
+
+    async def _text(self, text):
+        await self.emit('delta', text)
+
+    async def _read(self, proc):
+        async for raw in proc.stdout:
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                continue
+            t = d.get('type')
+            if d.get('session_id') and d.get('session_id') != self.session:
+                self.session = d['session_id']
+                SESSION_FILE.write_text(json.dumps({'session_id': self.session}))
+            if t == 'stream_event':
+                ev = d.get('event', {})
+                et = ev.get('type')
+                if et == 'message_start':
+                    self.at_message_start = True
+                    self.head = ''
+                elif et == 'content_block_delta' and ev.get('delta', {}).get('type') == 'text_delta':
+                    await self._text(ev['delta']['text'])
+                elif et == 'message_stop':
+                    await self.emit('flush', None)
+            elif t == 'assistant':
+                for block in d.get('message', {}).get('content', []):
+                    if block.get('type') == 'tool_use':
+                        await self.emit('tool', {'name': block.get('name'), 'input': block.get('input')})
+            elif t == 'user':
+                content = d.get('message', {}).get('content')
+                for block in content if isinstance(content, list) else []:
+                    if block.get('type') == 'tool_result' and block.get('is_error'):
+                        await self.emit('tool_error', str(block.get('content'))[:300])
+            elif t == 'result':
+                self.busy = False
+                await self.emit('done', {'cost': d.get('total_cost_usd'), 'error': d.get('is_error')})
+        if proc is self.proc:
+            self.busy = False
+            await self.emit('done', {'error': True, 'exited': True})
+
+
+# ================================================================ interface
+app = FastAPI()
+app.mount('/ui', StaticFiles(directory=ROOT / 'ui'), name='ui')
+
+
+@app.middleware('http')
+async def no_stale_ui(request, call_next):
+    # A interface muda com frequência: o navegador sempre confere a versão.
+    response = await call_next(request)
+    if request.url.path == '/' or request.url.path.startswith('/ui/'):
+        response.headers['Cache-Control'] = 'no-cache'
+    return response
+clients: set[WebSocket] = set()
+
+
+async def broadcast(msg: dict):
+    for ws in list(clients):
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            clients.discard(ws)
+
+
+class Mouth:
+    """Junta o texto em frases e fala uma de cada vez, em ordem."""
+
+    SENTENCE = re.compile(r'(.+?[.!?…:;](?=\s|$)|.+?\n)', re.S)
+
+    def __init__(self):
+        self.buffer = ''
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.generation = 0
+        self.emotion = 'neutro'
+        asyncio.create_task(self._worker())
+
+    def feed(self, text):
+        self.buffer += text
+        while True:
+            m = self.SENTENCE.match(self.buffer)
+            if not m:
+                break
+            end = m.end()
+            if len(m.group(1).strip()) < 18 and not m.group(1).endswith('\n'):
+                nxt = self.SENTENCE.match(self.buffer, end)
+                if not nxt:
+                    break
+                end = nxt.end()
+            self.queue.put_nowait((self.generation, self.buffer[:end]))
+            self.buffer = self.buffer[end:]
+
+    def flush(self):
+        if self.buffer.strip():
+            self.queue.put_nowait((self.generation, self.buffer))
+        self.buffer = ''
+
+    def say(self, text):
+        """Fala avulsa (lembretes, alertas, saudação)."""
+        self.queue.put_nowait((self.generation, text))
+
+    def stop(self):
+        self.generation += 1
+        self.buffer = ''
+        self.emotion = 'neutro'
+
+    async def _worker(self):
+        loop = asyncio.get_running_loop()
+        while True:
+            gen, text = await self.queue.get()
+            if gen != self.generation:
+                continue
+            # A emoção vale a partir da frase em que a etiqueta aparece.
+            tags = [t.lower() for t in EMO_TAG.findall(text) if t.lower() in EMOTIONS]
+            if tags:
+                self.emotion = tags[0]
+            emotion = self.emotion
+            if len(tags) > 1:
+                self.emotion = tags[-1]
+            spoken = speakable(strip_tags(text))
+            if not spoken:
+                continue
+            try:
+                audio = await loop.run_in_executor(TTS_POOL, synthesize, spoken)
+            except Exception as e:
+                print('[tts]', e, flush=True)
+                continue
+            if gen != self.generation:
+                continue
+            await broadcast({'type': 'say', 'text': spoken, 'emotion': emotion,
+                             'audio': base64.b64encode(audio).decode()})
+
+
+mouth: Mouth | None = None
+brain: Brain | None = None
+follow_up_until = 0.0
+mode = CONFIG.get('mode', 'free')
+CONFIRM = re.compile(r'\b(confirm[oa]|confirmad[oa]|pode (fazer|seguir|ir|executar)|autorizo|sim,? pode)\b', re.I)
+ALWAYS_WORDS = re.compile(r'\bsempre\b', re.I)
+DENY = re.compile(r'\b(n[ãa]o|cancela|cancelar|negativo|nego|esquece)\b', re.I)
+WAKE = re.compile(r'\b(mestre|meste|mestra|mestres|maestro)\b[\s,.!?:]*', re.I)
+
+
+_ui_hold = ''
+
+
+async def on_brain(kind, payload):
+    global follow_up_until, _ui_hold
+    if kind == 'delta':
+        mouth.feed(payload)
+        text = _ui_hold + payload
+        cut = text.rfind('[')
+        if cut != -1 and ']' not in text[cut:] and len(text) - cut < 16:
+            text, _ui_hold = text[:cut], text[cut:]
+        else:
+            _ui_hold = ''
+        text = strip_tags(text)
+        if text:
+            await broadcast({'type': 'delta', 'text': text})
+        first = EMO_TAG.match(payload)
+        if first and first.group(1).lower() in EMOTIONS:
+            await broadcast({'type': 'emotion', 'name': first.group(1).lower()})
+    elif kind == 'emotion':
+        await broadcast({'type': 'emotion', 'name': payload})
+    elif kind == 'flush':
+        mouth.flush()
+        if _ui_hold:
+            await broadcast({'type': 'delta', 'text': strip_tags(_ui_hold)})
+            _ui_hold = ''
+    elif kind == 'tool':
+        await broadcast({'type': 'tool', 'name': payload['name'], 'detail': describe_tool(payload)})
+    elif kind == 'tool_error':
+        if 'AÇÃO PROTEGIDA' in payload and PENDING.exists():
+            p = json.loads(PENDING.read_text())
+            await broadcast({'type': 'pending', 'why': p['why'], 'summary': p['summary'], 'tool': p['tool']})
+    elif kind == 'done':
+        mouth.flush()
+        if brain.restart_when_idle and not payload.get('exited'):
+            brain.restart_when_idle = False
+            asyncio.create_task(brain.restart(keep_session=True))
+        follow_up_until = time.time() + CONFIG.get('follow_up_seconds', 12)
+        await broadcast({'type': 'done', **(payload or {})})
+
+
+def describe_tool(t):
+    name = t['name'] or ''
+    i = t.get('input') or {}
+    if name == 'Bash':
+        return str(i.get('command') or i.get('description', ''))[:160]
+    if name.startswith('mcp__playwright__'):
+        return 'navegador: ' + name.split('__')[-1].replace('browser_', '') + ' ' + str(i.get('url') or i.get('element') or '')[:100]
+    for k in ('file_path', 'url', 'query', 'pattern', 'description'):
+        if i.get(k):
+            return f'{name}: {str(i[k])[:140]}'
+    return name
+
+
+def always_rules():
+    try:
+        return json.loads(ALWAYS.read_text())
+    except (OSError, ValueError):
+        return []
+
+
+async def decide_pending(choice: str):
+    """Decisão sobre a ação protegida: 'once', 'always' ou 'deny'."""
+    if not PENDING.exists():
+        return False
+    pending = json.loads(PENDING.read_text())
+    PENDING.unlink(missing_ok=True)
+    if choice == 'deny':
+        await broadcast({'type': 'denied', 'summary': pending['summary']})
+        await send_to_brain('Não. Cancele essa ação.', echo=False)
+        return True
+    if choice == 'always':
+        rules = always_rules()
+        rule = {'tool': pending['tool'], 'match': pending.get('match') or pending['summary'],
+                'why': pending['why'], 'added': datetime.now().isoformat(timespec='seconds')}
+        if rule['match'] not in [r['match'] for r in rules]:
+            rules.append(rule)
+            ALWAYS.write_text(json.dumps(rules, ensure_ascii=False, indent=1))
+    APPROVED.write_text(json.dumps({'fp': pending['fp'], 'expires': time.time() + 180}))
+    await broadcast({'type': 'approved', 'summary': pending['summary'], 'always': choice == 'always'})
+    await send_to_brain('Confirmo.', echo=False)
+    return True
+
+
+async def send_to_brain(text: str, echo=True):
+    mouth.stop()
+    if echo:
+        await broadcast({'type': 'user', 'text': text})
+    await broadcast({'type': 'status', 'state': 'thinking'})
+    if brain.busy:
+        await brain.interrupt()
+        await asyncio.sleep(0.3)
+    await brain.ask(text)
+
+
+async def handle_utterance(text: str, source: str):
+    """Fala ou texto do usuário: confirmação, palavra de ativação e envio ao cérebro."""
+    text = text.strip()
+    if not text:
+        return
+    if source == 'voice' and mode == 'wake' and time.time() > follow_up_until and not brain.busy:
+        m = WAKE.search(text)
+        if not m:
+            await broadcast({'type': 'heard', 'text': text, 'ignored': True})
+            await broadcast({'type': 'status', 'state': 'idle'})
+            return
+        if not text[:m.start()].strip(' ,.!?:;-'):
+            text = text[m.end():].strip() or 'Você está aí?'
+    if PENDING.exists():
+        pending = json.loads(PENDING.read_text())
+        if time.time() - pending.get('at', 0) < 300:
+            choice = None
+            if ALWAYS_WORDS.search(text) and (CONFIRM.search(text) or 'pode' in text.lower()):
+                choice = 'always'
+            elif CONFIRM.search(text):
+                choice = 'once'
+            elif DENY.search(text):
+                choice = 'deny'
+            if choice:
+                await broadcast({'type': 'user', 'text': text})
+                await decide_pending(choice)
+                return
+        else:
+            PENDING.unlink(missing_ok=True)
+    await send_to_brain(text)
+
+
+# ================================================================ autonomia: agenda e tarefas
+def load_agenda():
+    try:
+        return json.loads(AGENDA.read_text())
+    except (OSError, ValueError):
+        return []
+
+
+def save_agenda(items):
+    AGENDA.write_text(json.dumps(items, ensure_ascii=False, indent=1))
+
+
+def repeat_step(repeat: str):
+    if repeat in ('diario', 'dias-uteis'):
+        return timedelta(days=1)
+    if repeat == 'semanal':
+        return timedelta(weeks=1)
+    if repeat.startswith('horas:'):
+        return timedelta(hours=float(repeat.split(':')[1]))
+    if repeat.startswith('minutos:'):
+        return timedelta(minutes=max(1.0, float(repeat.split(':')[1])))
+    return None
+
+
+def next_time(when: float, repeat: str | None):
+    step = repeat_step(repeat) if repeat else None
+    if not step:
+        return None
+    dt = datetime.fromtimestamp(when) + step
+    while dt.timestamp() < time.time() or (repeat == 'dias-uteis' and dt.weekday() >= 5):
+        dt += step
+    return dt.timestamp()
+
+
+jobs: dict[str, dict] = {}
+
+
+async def run_task(text: str, origin='pedido'):
+    """Tarefa autônoma num processo `claude -p` separado: a conversa continua livre."""
+    job_id = uuid.uuid4().hex[:8]
+    jobs[job_id] = {'id': job_id, 'text': text, 'started': time.time(), 'status': 'rodando', 'origin': origin}
+    await broadcast({'type': 'task', 'job': jobs[job_id]})
+    prompt = (f'TAREFA AUTÔNOMA ({origin}). O usuário não está acompanhando em tempo real e não pode '
+              f'confirmar nada agora: ações protegidas serão negadas, então faça o que for possível sem elas '
+              f'e diga o que ficou pendente. Ao terminar, responda só com um resumo falado de uma a três '
+              f'frases, sem etiqueta de emoção e sem markdown.\n\nTarefa: {text}')
+    cmd = ['claude', '-p', prompt, '--output-format', 'json', *claude_flags(),
+           '--settings', str(claude_settings_file()), '--append-system-prompt', persona_prompt(),
+           '--model', CONFIG['model']]
+    env = {**claude_env(), 'MESTRE_AUTONOMOUS': '1'}
+    try:
+        proc = await asyncio.create_subprocess_exec(*cmd, cwd=str(HOME), env=env, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=CONFIG.get('task_timeout', 1800))
+        result = json.loads(out or b'{}').get('result', '').strip() or 'A tarefa terminou sem resposta.'
+        status = 'concluída'
+    except asyncio.TimeoutError:
+        result, status = 'A tarefa passou do tempo limite e foi interrompida.', 'tempo esgotado'
+    except Exception as e:
+        result, status = f'A tarefa falhou: {e}', 'falhou'
+    result = strip_tags(result).strip()
+    report = WORK / 'relatorios' / f"{datetime.now():%Y-%m-%d_%H%M}_{job_id}.md"
+    report.write_text(f'# Tarefa {job_id}\n\n**Pedido:** {text}\n\n**Situação:** {status}\n\n{result}\n')
+    jobs[job_id].update(status=status, result=result, finished=time.time(), report=str(report))
+    await broadcast({'type': 'task', 'job': jobs[job_id]})
+    await broadcast({'type': 'emotion', 'name': 'sorriso' if status == 'concluída' else 'preocupado'})
+    mouth.say(f'Tarefa em segundo plano {status}. {result}')
+    subprocess.Popen(['notify-send', '-i', str(HOME / '.local/share/icons/mestre.svg'), 'MESTRE', result[:250]])
+
+
+async def agenda_loop():
+    while True:
+        await asyncio.sleep(15)
+        items = load_agenda()
+        now = time.time()
+        changed = False
+        for item in list(items):
+            if item['when'] > now:
+                continue
+            changed = True
+            if item['kind'] == 'tarefa':
+                asyncio.create_task(run_task(item['text'], origin='agendada'))
+            else:
+                await broadcast({'type': 'reminder', 'item': item})
+                await broadcast({'type': 'emotion', 'name': 'alerta'})
+                mouth.say(f"Lembrete: {item['text']}")
+                subprocess.Popen(['notify-send', '-u', 'critical', '-i', str(HOME / '.local/share/icons/mestre.svg'),
+                                  'MESTRE — lembrete', item['text']])
+            nxt = next_time(item['when'], item.get('repeat'))
+            if nxt:
+                item['when'] = nxt
+            else:
+                items.remove(item)
+        if changed:
+            save_agenda(items)
+            await broadcast({'type': 'agenda', 'items': items})
+
+
+# ================================================================ autonomia: vigilância
+def http_ok(url):
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return r.status < 500
+    except urllib.error.HTTPError as e:
+        return e.code < 500
+    except Exception:
+        return False
+
+
+async def watch_loop():
+    """Avisa sozinho quando algo sai do normal (uma vez por problema)."""
+    alerted: set[str] = set()
+    baseline = None
+    loop = asyncio.get_running_loop()
+    while True:
+        await asyncio.sleep(60)
+        if not CONFIG.get('watch', True):
+            continue
+        problems = {}
+        if psutil.disk_usage(str(HOME)).percent > 90:
+            problems['disco'] = 'o disco principal passou de noventa por cento'
+        g = gpu_stats()
+        if g and g['temp'] >= 85:
+            problems['gpu'] = f"a placa de vídeo está a {int(g['temp'])} graus"
+        temps = psutil.sensors_temperatures() if hasattr(psutil, 'sensors_temperatures') else {}
+        cpu_t = max((t.current for v in temps.values() for t in v if t.current), default=0)
+        if cpu_t >= 95:
+            problems['cpu'] = f'o processador chegou a {int(cpu_t)} graus'
+        if psutil.virtual_memory().percent > 92:
+            problems['ram'] = 'a memória está quase cheia'
+        bat = psutil.sensors_battery()
+        if bat and not bat.power_plugged and bat.percent < 15:
+            problems['bateria'] = f'a bateria está em {int(bat.percent)} por cento e o carregador desligado'
+        try:
+            names = set(subprocess.run(['docker', 'ps', '--format', '{{.Names}}'], capture_output=True,
+                                       text=True, timeout=5).stdout.split())
+            if baseline is None:
+                baseline = set(names)
+            for gone in baseline - names:
+                problems[f'container:{gone}'] = f'o container {gone} parou'
+            baseline |= names
+        except Exception:
+            pass
+        for key, url in CONFIG.get('watch_urls', {}).items():
+            if not await loop.run_in_executor(None, http_ok, url):
+                problems[f'url:{key}'] = f'o {key} não está respondendo'
+        for key, msg in problems.items():
+            if key not in alerted:
+                alerted.add(key)
+                await broadcast({'type': 'alert', 'text': msg})
+                await broadcast({'type': 'emotion', 'name': 'alerta'})
+                mouth.say(f'Atenção: {msg}.')
+                subprocess.Popen(['notify-send', '-u', 'critical', 'MESTRE — alerta', msg])
+        for key in list(alerted):
+            if key not in problems:
+                alerted.discard(key)
+                if key.startswith('container:') and baseline is not None:
+                    baseline.discard(key.split(':', 1)[1])
+
+
+# ================================================================ HTTP
+@app.on_event('startup')
+async def startup():
+    global mouth, brain
+    mouth = Mouth()
+    brain = Brain(on_brain)
+    loop = asyncio.get_running_loop()
+    if CONFIG.get('stt') != 'openai':
+        loop.run_in_executor(STT_POOL, whisper)
+    loop.run_in_executor(TTS_POOL, synthesize, 'Pronto.')
+    await brain.start()
+    asyncio.create_task(agenda_loop())
+    asyncio.create_task(watch_loop())
+
+
+@app.get('/')
+async def index():
+    return FileResponse(ROOT / 'ui' / 'index.html')
+
+
+def gpu_stats():
+    try:
+        out = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu',
+                              '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=2).stdout
+        u, used, total, temp = [float(x) for x in out.strip().split(',')]
+        return {'util': u, 'mem': round(used / total * 100), 'temp': temp}
+    except Exception:
+        return None
+
+
+_net = {'t': time.time(), 'rx': psutil.net_io_counters().bytes_recv, 'tx': psutil.net_io_counters().bytes_sent}
+
+
+@app.get('/api/stats')
+async def stats():
+    now = time.time()
+    io_ = psutil.net_io_counters()
+    dt = max(0.5, now - _net['t'])
+    rx, tx = (io_.bytes_recv - _net['rx']) / dt, (io_.bytes_sent - _net['tx']) / dt
+    _net.update(t=now, rx=io_.bytes_recv, tx=io_.bytes_sent)
+    try:
+        containers = subprocess.run(['docker', 'ps', '-q'], capture_output=True, text=True, timeout=2).stdout.split()
+    except Exception:
+        containers = []
+    return JSONResponse({
+        'cpu': psutil.cpu_percent(), 'ram': psutil.virtual_memory().percent,
+        'disk': psutil.disk_usage(str(HOME)).percent, 'gpu': gpu_stats(),
+        'net': {'rx': rx, 'tx': tx}, 'containers': len(containers), 'uptime': now - psutil.boot_time(),
+        'brain': 'online' if brain and brain.proc and brain.proc.returncode is None else 'offline',
+        'model': CONFIG['model'], 'jobs': sum(1 for j in jobs.values() if j['status'] == 'rodando'),
+        'agenda': len(load_agenda()),
+    })
+
+
+VOICE_CHOICES = {'masculino': {'pm_alex': 'Alex', 'pm_santa': 'Santa (encorpada)', 'piper-faber': 'Faber (Piper)'},
+                 'feminino': {'pf_dora': 'Dora'}}
+
+
+def public_settings():
+    prof = voice_profile()
+    return {'mode': mode, 'stt': CONFIG.get('stt', 'local'), 'gender': CONFIG.get('gender', 'masculino'),
+            'voice': prof.get('voice'), 'pitch': prof.get('pitch', 1.0),
+            'voice_choices': VOICE_CHOICES[CONFIG.get('gender', 'masculino')],
+            'model': CONFIG['model'], 'watch': CONFIG.get('watch', True),
+            'openai_key_set': bool(secrets().get('openai_api_key')), 'always': always_rules(),
+            'theme': CONFIG.get('theme', 'auto'), 'rain': CONFIG.get('rain', True),
+            'permissions': permissions.public()}
+
+
+@app.get('/api/settings')
+async def get_settings():
+    return public_settings()
+
+
+@app.post('/api/settings')
+async def set_settings(req: Request):
+    global mode
+    data = await req.json()
+    restart = False
+    if data.get('mode') in ('free', 'wake', 'ptt'):
+        mode = CONFIG['mode'] = data['mode']
+    if data.get('stt') in ('local', 'openai'):
+        CONFIG['stt'] = data['stt']
+        if data['stt'] == 'local':
+            asyncio.get_running_loop().run_in_executor(STT_POOL, whisper)
+    if data.get('gender') in ('masculino', 'feminino') and data['gender'] != CONFIG.get('gender'):
+        CONFIG['gender'] = data['gender']
+        restart = True
+    if data.get('model') in ('opus', 'sonnet', 'haiku') and data['model'] != CONFIG['model']:
+        CONFIG['model'] = data['model']
+        restart = True
+    if isinstance(data.get('watch'), bool):
+        CONFIG['watch'] = data['watch']
+    if data.get('theme') in ('auto', 'ciano', 'verde', 'ambar', 'vermelho', 'roxo', 'rosa', 'branco'):
+        CONFIG['theme'] = data['theme']
+    if isinstance(data.get('rain'), bool):
+        CONFIG['rain'] = data['rain']
+    g = CONFIG.get('gender', 'masculino')
+    if data.get('voice') in VOICE_CHOICES[g]:
+        CONFIG['voices'][g]['voice'] = data['voice']
+        CONFIG['voices'][g]['engine'] = 'piper' if data['voice'].startswith('piper') else 'kokoro'
+    if isinstance(data.get('pitch'), (int, float)) and 0.7 <= data['pitch'] <= 1.2:
+        CONFIG['voices'][g]['pitch'] = round(float(data['pitch']), 2)
+    if isinstance(data.get('openai_api_key'), str):
+        s = secrets()
+        key = data['openai_api_key'].strip()
+        if key:
+            s['openai_api_key'] = key
+        else:
+            s.pop('openai_api_key', None)
+        SECRETS.write_text(json.dumps(s))
+        os.chmod(SECRETS, 0o600)
+    if isinstance(data.get('permissions'), dict):
+        before = permissions.disallowed_tools(permissions.current())
+        perms = CONFIG.setdefault('permissions', {})
+        for k, v in data['permissions'].items():
+            if k in permissions.PERMISSIONS and isinstance(v, bool):
+                perms[k] = v
+        save_config()
+        if permissions.disallowed_tools(permissions.current()) != before:
+            restart = True  # ferramentas inteiras entram ou saem do cérebro
+    if isinstance(data.get('remove_always'), str):
+        ALWAYS.write_text(json.dumps([r for r in always_rules() if r['match'] != data['remove_always']],
+                                     ensure_ascii=False, indent=1))
+    save_config()
+    if restart:
+        # Não corta uma resposta no meio: reinicia quando ela terminar.
+        if brain.busy:
+            brain.restart_when_idle = True
+        else:
+            await brain.restart(keep_session=True)
+    await broadcast({'type': 'settings', 'settings': public_settings()})
+    return public_settings()
+
+
+_connections = {'at': 0, 'data': {}}
+CONNECTOR_NAMES = {'gmail': 'Gmail', 'calendar': 'Google Calendar', 'drive': 'Google Drive',
+                   'docs': 'Claude Docs', 'cloudflare': 'Cloudflare Developer Platform', 'browser': 'playwright'}
+
+
+@app.get('/api/connections')
+async def connections(refresh: bool = False):
+    """Estado dos conectores (claude mcp list), guardado por 2 minutos."""
+    if refresh or time.time() - _connections['at'] > 120:
+        try:
+            proc = await asyncio.create_subprocess_exec('claude', 'mcp', 'list', cwd=str(HOME), env=claude_env(),
+                                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+            text = out.decode(errors='replace')
+        except Exception:
+            text = ''
+        data = {}
+        for key, name in CONNECTOR_NAMES.items():
+            line = next((l for l in text.splitlines() if l.split(':')[0].strip().endswith(name)), '')
+            data[key] = 'conectado' if '✔' in line or 'Connected' in line else \
+                        'precisa entrar' if 'authentication' in line.lower() else \
+                        'falhou' if '✗' in line or 'Failed' in line else 'desconhecido'
+        _connections.update(at=time.time(), data=data)
+    return _connections['data']
+
+
+@app.post('/api/connect/{key}')
+async def connect(key: str):
+    """Conectar um serviço: o cérebro chama a autenticação do conector e abre o link."""
+    if key == 'manage':
+        subprocess.Popen(['xdg-open', 'https://claude.ai/settings/connectors'], env=claude_env())
+        return {'ok': True}
+    name = CONNECTOR_NAMES.get(key)
+    if not name:
+        return JSONResponse({'ok': False}, status_code=404)
+    await send_to_brain(f'Conecte o {name}: chame a ferramenta de autenticação desse conector '
+                        f'(a que termina em __authenticate) e abra o link que ela devolver no meu navegador com '
+                        f'mestre-pc open. Depois me diga para fazer o login e avisar quando terminar.')
+    _connections['at'] = 0
+    return {'ok': True}
+
+
+@app.get('/api/agenda')
+async def agenda_list():
+    return load_agenda()
+
+
+@app.post('/api/agenda')
+async def agenda_add(req: Request):
+    d = await req.json()
+    item = {'id': uuid.uuid4().hex[:6], 'when': float(d['when']), 'repeat': d.get('repeat') or None,
+            'kind': 'tarefa' if d.get('kind') == 'tarefa' else 'lembrete', 'text': d['text']}
+    items = load_agenda()
+    items.append(item)
+    items.sort(key=lambda i: i['when'])
+    save_agenda(items)
+    await broadcast({'type': 'agenda', 'items': items})
+    return item
+
+
+@app.delete('/api/agenda/{item_id}')
+async def agenda_del(item_id: str):
+    items = [i for i in load_agenda() if i['id'] != item_id]
+    save_agenda(items)
+    await broadcast({'type': 'agenda', 'items': items})
+    return {'ok': True}
+
+
+@app.post('/api/task')
+async def task_new(req: Request):
+    d = await req.json()
+    asyncio.create_task(run_task(d['text']))
+    return {'ok': True}
+
+
+@app.get('/api/tasks')
+async def task_list():
+    return list(jobs.values())
+
+
+@app.post('/api/window/{action}')
+async def window(action: str):
+    pc = str(ROOT / 'bin' / 'mestre-pc')
+    env = claude_env()
+    if action == 'minimize':
+        subprocess.Popen([pc, 'minimize', 'MESTRE'], env=env)
+    elif action == 'maximize':
+        subprocess.Popen([pc, 'fullscreen', 'MESTRE', '--toggle'], env=env)
+    elif action == 'close':
+        subprocess.Popen([str(HOME / '.local' / 'bin' / 'mestre'), 'stop'], start_new_session=True)
+    return {'ok': True}
+
+
+@app.websocket('/ws')
+async def ws_endpoint(ws: WebSocket):
+    await ws.accept()
+    clients.add(ws)
+    loop = asyncio.get_running_loop()
+    await ws.send_json({'type': 'hello', 'settings': public_settings(), 'agenda': load_agenda(),
+                        'tasks': list(jobs.values())})
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get('type') == 'websocket.disconnect':
+                break
+            if msg.get('bytes') is not None:
+                await broadcast({'type': 'status', 'state': 'transcribing'})
+                try:
+                    text = await loop.run_in_executor(STT_POOL, transcribe, msg['bytes'])
+                except Exception as e:
+                    print('[stt]', e, flush=True)
+                    text = ''
+                if not text:
+                    await broadcast({'type': 'status', 'state': 'idle'})
+                    continue
+                await handle_utterance(text, 'voice')
+                continue
+            if not msg.get('text'):
+                continue
+            data = json.loads(msg['text'])
+            kind = data.get('type')
+            if kind == 'text':
+                await handle_utterance(data.get('text', ''), 'typed')
+            elif kind == 'decision':
+                await decide_pending(data.get('choice', 'deny'))
+            elif kind == 'stop':
+                mouth.stop()
+                await brain.interrupt()
+            elif kind == 'reset':
+                mouth.stop()
+                await brain.restart(keep_session=False)
+                await broadcast({'type': 'reset'})
+            elif kind == 'test_voice':
+                mouth.stop()
+                mouth.say('Teste de voz. É assim que eu soo agora, senhor.' if CONFIG.get('gender') != 'feminino'
+                          else 'Teste de voz. É assim que eu soo agora.')
+            elif kind == 'greet':
+                await broadcast({'type': 'emotion', 'name': 'sorriso'})
+                mouth.say(CONFIG['greeting_f' if CONFIG.get('gender') == 'feminino' else 'greeting'])
+    except WebSocketDisconnect:
+        pass
+    finally:
+        clients.discard(ws)

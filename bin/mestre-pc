@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+import os as _os
+import sys as _sys
+
+_VENV = _os.path.join(_os.path.dirname(_os.path.realpath(__file__)), '..', '.venv', 'bin', 'python')
+if _os.path.exists(_VENV) and _os.path.realpath(_sys.prefix) != _os.path.realpath(_os.path.join(_os.path.dirname(_VENV), '..')):
+    _os.execv(_VENV, [_VENV, *_sys.argv])
+"""mestre-pc: controle da área de trabalho (X11) para o MESTRE.
+
+  mestre-pc screen                    tamanho da tela
+  mestre-pc screenshot [arquivo.png]  captura a tela (padrão /tmp/mestre-tela.png)
+  mestre-pc windows                   lista as janelas abertas (id, título)
+  mestre-pc focus <trecho do título>  traz a janela para frente
+  mestre-pc fullscreen <título> [--off|--toggle]  tela cheia na janela
+  mestre-pc minimize <título>         minimiza a janela
+  mestre-pc click X Y [left|right|double]
+  mestre-pc move X Y
+  mestre-pc scroll N                  N>0 desce, N<0 sobe
+  mestre-pc type "texto"              digita o texto
+  mestre-pc key ctrl+l                atalho de teclado (ctrl, alt, shift, super, enter, tab, esc, f1…)
+  mestre-pc open <programa|url|arquivo>
+  mestre-pc camera [arquivo.jpg] [--dispositivo N]   foto da webcam (padrão /tmp/mestre-camera.jpg)
+  mestre-pc clipboard                 mostra o texto da área de transferência
+  mestre-pc clipboard set "texto"     copia o texto para a área de transferência
+  mestre-pc volume [N|+N|-N|mudo]     volume do som (0-100)
+  mestre-pc media play|pause|proxima|anterior
+"""
+import os
+import subprocess
+import sys
+import time
+
+def _detect_display():
+    # A sessão gráfica pode ser :0, :1…: usa a que tem soquete aberto.
+    try:
+        socks = sorted(f for f in os.listdir('/tmp/.X11-unix') if f.startswith('X'))
+        return ':' + socks[0][1:] if socks else ':0'
+    except OSError:
+        return ':0'
+
+
+os.environ.setdefault('DISPLAY', _detect_display())
+os.environ.setdefault('XAUTHORITY', f"/run/user/{os.getuid()}/gdm/Xauthority")
+
+
+def screen_size():
+    from Xlib import display
+    s = display.Display().screen()
+    return s.width_in_pixels, s.height_in_pixels
+
+
+def screenshot(path='/tmp/mestre-tela.png'):
+    from PIL import ImageGrab
+    img = ImageGrab.grab(xdisplay=os.environ['DISPLAY'])
+    # Reduz telas grandes: a imagem vai para o modelo ler.
+    if img.width > 1600:
+        img = img.resize((1600, round(img.height * 1600 / img.width)))
+    img.save(path)
+    print(f'{path} ({img.width}x{img.height}; coordenadas reais = x*{screen_size()[0] / img.width:.3f})')
+
+
+def windows():
+    from Xlib import X, display
+    d = display.Display()
+    root = d.screen().root
+    net_list = d.intern_atom('_NET_CLIENT_LIST')
+    net_name = d.intern_atom('_NET_WM_NAME')
+    utf8 = d.intern_atom('UTF8_STRING')
+    ids = root.get_full_property(net_list, X.AnyPropertyType).value
+    out = []
+    for wid in ids:
+        w = d.create_resource_object('window', wid)
+        try:
+            prop = w.get_full_property(net_name, utf8)
+            name = prop.value.decode('utf-8', 'replace') if prop else (w.get_wm_name() or '')
+        except Exception:
+            name = ''
+        if name:
+            out.append((wid, name))
+    return out
+
+
+def focus(fragment):
+    from Xlib import X, display, protocol
+    frag = fragment.lower()
+    for wid, name in windows():
+        if frag in name.lower():
+            d = display.Display()
+            root = d.screen().root
+            w = d.create_resource_object('window', wid)
+            ev = protocol.event.ClientMessage(
+                window=w, client_type=d.intern_atom('_NET_ACTIVE_WINDOW'), data=(32, [2, X.CurrentTime, 0, 0, 0]))
+            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            d.flush()
+            print(f'focada: {name}')
+            return
+    print(f'nenhuma janela com "{fragment}"')
+    sys.exit(1)
+
+
+def fullscreen(fragment, on=True):
+    """Pede ao gerenciador de janelas a tela cheia (_NET_WM_STATE_FULLSCREEN)."""
+    from Xlib import X, display, protocol
+    frag = fragment.lower()
+    for wid, name in windows():
+        if frag in name.lower():
+            d = display.Display()
+            root = d.screen().root
+            w = d.create_resource_object('window', wid)
+            ev = protocol.event.ClientMessage(
+                window=w, client_type=d.intern_atom('_NET_WM_STATE'),
+                data=(32, [on if isinstance(on, int) else 1, d.intern_atom('_NET_WM_STATE_FULLSCREEN'), 0, 1, 0]))
+            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            d.flush()
+            print(f'tela cheia {["desligada", "ligada", "alternada"][on]}: {name}')
+            return
+    print(f'nenhuma janela com "{fragment}"')
+    sys.exit(1)
+
+
+def minimize(fragment):
+    from Xlib import X, display, protocol
+    frag = fragment.lower()
+    for wid, name in windows():
+        if frag in name.lower():
+            d = display.Display()
+            root = d.screen().root
+            w = d.create_resource_object('window', wid)
+            ev = protocol.event.ClientMessage(window=w, client_type=d.intern_atom('WM_CHANGE_STATE'),
+                                              data=(32, [3, 0, 0, 0, 0]))  # IconicState
+            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            d.flush()
+            print(f'minimizada: {name}')
+            return
+    sys.exit(1)
+
+
+def mouse():
+    from pynput.mouse import Controller
+    return Controller()
+
+
+def click(x, y, kind='left'):
+    from pynput.mouse import Button
+    m = mouse()
+    m.position = (int(x), int(y))
+    time.sleep(0.05)
+    if kind == 'double':
+        m.click(Button.left, 2)
+    else:
+        m.click(Button.right if kind == 'right' else Button.left, 1)
+    print(f'clique {kind} em {x},{y}')
+
+
+KEYS = {
+    'ctrl': 'ctrl', 'control': 'ctrl', 'alt': 'alt', 'shift': 'shift', 'super': 'cmd', 'win': 'cmd',
+    'enter': 'enter', 'return': 'enter', 'tab': 'tab', 'esc': 'esc', 'escape': 'esc', 'space': 'space',
+    'backspace': 'backspace', 'delete': 'delete', 'up': 'up', 'down': 'down', 'left': 'left', 'right': 'right',
+    'home': 'home', 'end': 'end', 'pageup': 'page_up', 'pagedown': 'page_down',
+}
+
+
+def key(combo):
+    from pynput.keyboard import Controller, Key
+    kb = Controller()
+    parts = [p.strip().lower() for p in combo.split('+') if p.strip()]
+    resolved = []
+    for p in parts:
+        name = KEYS.get(p, p)
+        if hasattr(Key, name):
+            resolved.append(getattr(Key, name))
+        elif len(p) == 1:
+            resolved.append(p)
+        else:
+            print(f'tecla desconhecida: {p}')
+            sys.exit(1)
+    for k in resolved[:-1]:
+        kb.press(k)
+    kb.press(resolved[-1])
+    kb.release(resolved[-1])
+    for k in reversed(resolved[:-1]):
+        kb.release(k)
+    print(f'teclas {combo}')
+
+
+def camera(path='/tmp/mestre-camera.jpg', device=0):
+    import cv2
+    cap = cv2.VideoCapture(int(device))
+    if not cap.isOpened():
+        print(f'câmera {device} indisponível')
+        sys.exit(1)
+    for _ in range(8):  # deixa a exposição se ajustar
+        cap.read()
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        print('não consegui capturar a imagem')
+        sys.exit(1)
+    cv2.imwrite(path, frame)
+    print(f'{path} ({frame.shape[1]}x{frame.shape[0]})')
+
+
+def clipboard(args):
+    import tkinter
+    if args and args[0] == 'set':
+        text = ' '.join(args[1:])
+        # O Tk só mantém o conteúdo enquanto está vivo: um processo à parte
+        # segura a área de transferência até outro programa copiar algo.
+        if os.fork() == 0:
+            os.setsid()
+            r = tkinter.Tk()
+            r.withdraw()
+            r.clipboard_clear()
+            r.clipboard_append(text)
+            r.update()
+            r.after(3600 * 1000, r.destroy)
+            r.mainloop()
+            os._exit(0)
+        print('copiado')
+        return
+    r = tkinter.Tk()
+    r.withdraw()
+    try:
+        print(r.clipboard_get())
+    except tkinter.TclError:
+        print('(área de transferência vazia ou sem texto)')
+    r.destroy()
+
+
+def volume(arg=None):
+    sink = '@DEFAULT_AUDIO_SINK@'
+    if arg in ('mudo', 'mute'):
+        subprocess.run(['wpctl', 'set-mute', sink, 'toggle'])
+    elif arg:
+        if arg[0] in '+-':
+            subprocess.run(['wpctl', 'set-volume', '-l', '1.0', sink, f'{abs(int(arg))}%{arg[0]}'])
+        else:
+            subprocess.run(['wpctl', 'set-volume', '-l', '1.0', sink, f'{max(0, min(100, int(arg)))}%'])
+    out = subprocess.run(['wpctl', 'get-volume', sink], capture_output=True, text=True).stdout.strip()
+    print(out.replace('Volume:', 'volume').replace('[MUTED]', '(mudo)'))
+
+
+def media(action):
+    from pynput.keyboard import Controller, Key
+    keys = {'play': Key.media_play_pause, 'pause': Key.media_play_pause, 'tocar': Key.media_play_pause,
+            'proxima': Key.media_next, 'próxima': Key.media_next, 'anterior': Key.media_previous}
+    k = keys.get(action)
+    if not k:
+        print('use: play, pause, proxima, anterior')
+        sys.exit(1)
+    kb = Controller()
+    kb.press(k)
+    kb.release(k)
+    print(f'mídia: {action}')
+
+
+def main(argv):
+    if not argv or argv[0] in ('-h', '--help', 'help'):
+        print(__doc__)
+        return
+    cmd, args = argv[0], argv[1:]
+    if cmd == 'screen':
+        print('%dx%d' % screen_size())
+    elif cmd == 'screenshot':
+        screenshot(*(args[:1] or []))
+    elif cmd == 'windows':
+        for wid, name in windows():
+            print(f'{wid:#x}\t{name}')
+    elif cmd == 'focus':
+        focus(' '.join(args))
+    elif cmd == 'fullscreen':
+        on = 2 if '--toggle' in args else 0 if '--off' in args else 1  # _NET_WM_STATE: 0 tira, 1 põe, 2 alterna
+        fullscreen(' '.join(a for a in args if not a.startswith('--')), on=on)
+    elif cmd == 'minimize':
+        minimize(' '.join(args))
+    elif cmd == 'click':
+        click(*args[:3])
+    elif cmd == 'move':
+        mouse().position = (int(args[0]), int(args[1]))
+    elif cmd == 'scroll':
+        mouse().scroll(0, -int(args[0]))
+    elif cmd == 'type':
+        from pynput.keyboard import Controller
+        Controller().type(' '.join(args))
+        print('digitado')
+    elif cmd == 'key':
+        key(args[0])
+    elif cmd == 'camera':
+        dev = 0
+        if '--dispositivo' in args:
+            k = args.index('--dispositivo')
+            dev = args[k + 1]
+            args = args[:k] + args[k + 2:]
+        camera(*(args[:1] or []), device=dev)
+    elif cmd == 'clipboard':
+        clipboard(args)
+    elif cmd == 'volume':
+        volume(args[0] if args else None)
+    elif cmd == 'media':
+        media(args[0] if args else '')
+    elif cmd == 'open':
+        target = ' '.join(args)
+        if '://' in target or os.path.exists(os.path.expanduser(target)):
+            subprocess.Popen(['xdg-open', os.path.expanduser(target)], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(['gtk-launch', target], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f'abrindo {target}')
+    else:
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

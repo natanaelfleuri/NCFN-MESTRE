@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+import os as _os
+import sys as _sys
+
+_VENV = _os.path.join(_os.path.dirname(_os.path.realpath(__file__)), '..', '.venv', 'bin', 'python')
+if _os.path.exists(_VENV) and _os.path.realpath(_sys.prefix) != _os.path.realpath(_os.path.join(_os.path.dirname(_VENV), '..')):
+    _os.execv(_VENV, [_VENV, *_sys.argv])
+"""mestre-tarefa "pedido": executa o pedido sozinho em segundo plano.
+
+A conversa continua livre; quando a tarefa termina, o MESTRE fala o
+resultado e guarda um relatório em ~/Documentos/MESTRE/relatorios.
+  mestre-tarefa listar     tarefas desta sessão
+"""
+import json
+import os
+import sys
+import urllib.request
+
+URL = os.environ.get('MESTRE_URL', 'http://127.0.0.1:7777')
+a = sys.argv[1:]
+if not a or a[0] in ('-h', '--help'):
+    print(__doc__)
+elif a[0] == 'listar':
+    with urllib.request.urlopen(URL + '/api/tasks', timeout=10) as r:
+        for j in json.loads(r.read()):
+            print(f"{j['id']}  {j['status']:<14} {j['text'][:80]}")
+else:
+    req = urllib.request.Request(URL + '/api/task', data=json.dumps({'text': ' '.join(a)}).encode(),
+                                 headers={'Content-Type': 'application/json'})
+    urllib.request.urlopen(req, timeout=10).read()
+    print('Tarefa iniciada em segundo plano. O resultado será falado ao terminar.')
