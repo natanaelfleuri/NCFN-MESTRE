@@ -941,12 +941,22 @@ async def watch_loop():
         if bat and not bat.power_plugged and bat.percent < 15:
             problems['bateria'] = f'a bateria está em {int(bat.percent)} por cento e o carregador desligado'
         try:
-            names = set(subprocess.run(['docker', 'ps', '--format', '{{.Names}}'], capture_output=True,
-                                       text=True, timeout=5).stdout.split())
+            # Só containers feitos para ficar no ar (com política de reinício); temporários
+            # (testes, `docker run --rm`) e os apagados de propósito não geram alerta.
+            ids = subprocess.run(['docker', 'ps', '-q'], capture_output=True, text=True, timeout=5).stdout.split()
+            out = subprocess.run(['docker', 'inspect', '-f', '{{.Name}} {{.HostConfig.RestartPolicy.Name}}', *ids],
+                                 capture_output=True, text=True, timeout=5).stdout if ids else ''
+            names = {n.lstrip('/') for n, policy in (l.split() for l in out.splitlines() if l.strip())
+                     if policy not in ('', 'no')}
+            existing = set(subprocess.run(['docker', 'ps', '-a', '--format', '{{.Names}}'], capture_output=True,
+                                          text=True, timeout=5).stdout.split())
             if baseline is None:
                 baseline = set(names)
             for gone in baseline - names:
-                problems[f'container:{gone}'] = f'o container {gone} parou'
+                if gone in existing:
+                    problems[f'container:{gone}'] = f'o container {gone} parou'
+                else:
+                    baseline.discard(gone)
             baseline |= names
         except Exception:
             pass
